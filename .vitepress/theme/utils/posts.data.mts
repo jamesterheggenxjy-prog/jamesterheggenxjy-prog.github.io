@@ -2,7 +2,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import matter from 'gray-matter'
 import { fileURLToPath } from 'url'
-import { createMarkdownRenderer } from 'vitepress'
 // ES模块需要重新声明常量
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -22,6 +21,7 @@ interface Post {
   cover?: string
   excerpt: string | undefined
   pinned?: boolean
+  bookTitle?: string
 }
 
 // Post数据缓存
@@ -41,7 +41,7 @@ function countWords(text: string): number {
   return count
 }
 
-function getPost(md: any, file: string, postDir: string): Post {
+function getPost(file: string, postDir: string): Post {
   const fullPath = path.join(postDir, file)
   const timestamp = Math.floor(fs.statSync(fullPath).mtimeMs)
   // 缓存直接返回
@@ -52,6 +52,7 @@ function getPost(md: any, file: string, postDir: string): Post {
 
   const src = fs.readFileSync(fullPath, 'utf-8')
   const { data, excerpt, content } = matter(src, { excerpt: true })
+  const summary = data.description || excerpt
   const post: Post = {
     id: id++,
     title: data.title,
@@ -62,8 +63,10 @@ function getPost(md: any, file: string, postDir: string): Post {
     tags: data.tags,
     wordCount: countWords(content),
     cover: data.cover,
-    excerpt: excerpt,
-    pinned: !!data.pinned
+    // HTML parsing normalizes line endings before Vue hydrates the post list.
+    excerpt: typeof summary === 'string' ? summary.replace(/\r\n?/g, '\n') : undefined,
+    pinned: !!data.pinned,
+    bookTitle: typeof data.bookTitle === 'string' ? data.bookTitle.trim() : undefined,
   }
 
   cache.set(fullPath, { timestamp, post })
@@ -71,13 +74,12 @@ function getPost(md: any, file: string, postDir: string): Post {
 }
 
 // 加载posts文件夹
-async function load() {
-  const md = await createMarkdownRenderer(cwd)
+function load() {
   const postDir = path.join(cwd, 'posts')
   return fs
     .readdirSync(postDir)
     .filter((file) => file.endsWith('.md') && file !== 'index.md')
-    .map((file) => getPost(md, file, postDir))
+    .map((file) => getPost(file, postDir))
     .sort((a, b) => {
       // 先按置顶排序,再按创建时间排序
       if (a.pinned && !b.pinned) return -1

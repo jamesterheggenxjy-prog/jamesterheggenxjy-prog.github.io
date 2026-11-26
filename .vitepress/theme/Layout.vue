@@ -2,15 +2,17 @@
   <Splash></Splash>
   <template v-if="!page.isNotFound">
     <main style="min-height: 100vh">
-      <Navbar></Navbar>
-      <Banner>
+      <Navbar :compact="isSeries"></Navbar>
+      <Banner :class="{ 'series-banner': isSeries }">
         <transition name="fade" mode="out-in">
           <WelcomeBox v-if="!state.splashLoading && page.filePath === 'index.md'"></WelcomeBox>
           <Tags v-else-if="page.filePath === 'tags/index.md'"></Tags>
+          <h1 v-else-if="isSeries" class="series-title">系列</h1>
           <PostInnerBanner v-else></PostInnerBanner>
         </transition>
       </Banner>
-      <transition name="fade" mode="out-in">
+      <SeriesShelf v-if="isSeries" />
+      <transition v-else name="fade" mode="out-in">
         <PostsList
           v-if="page.filePath === 'index.md' || page.filePath === 'tags/index.md'"
         ></PostsList>
@@ -35,6 +37,7 @@ import Splash from './components/Splash.vue'
 import Navbar from './components/Navbar/index.vue'
 import Banner from './components/Banner.vue'
 import WelcomeBox from './components/Welcome-Box.vue'
+import SeriesShelf from './components/SeriesShelf.vue'
 import PostsList from './components/Posts-List.vue'
 import Tags from './components/Tags.vue'
 import PostViewer from './components/Post-Viewer.vue'
@@ -47,7 +50,9 @@ import Footer from './components/Footer.vue'
 import SpinePlayer from './components/Spine-Player/index.vue'
 // 路径切换
 import { useData } from 'vitepress'
+import { computed } from 'vue'
 const { page } = useData()
+const isSeries = computed(() => page.value.filePath === 'series/index.md')
 
 import { useStore } from './store'
 const { state } = useStore()
@@ -71,6 +76,18 @@ html {
 .container {
   max-width: 1200px;
   margin: 0 auto;
+}
+
+.banner.series-banner {
+  height: clamp(220px, 42vh, 320px);
+}
+
+.series-title {
+  z-index: 1;
+  margin: 56px 0 0;
+  font-size: clamp(30px, 5vw, 52px);
+  color: var(--post-InnerBanner-color);
+  text-shadow: 0 0 5px rgba(0, 0, 0, 0.8);
 }
 
 body {

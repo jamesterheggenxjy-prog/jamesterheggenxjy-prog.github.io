@@ -1,19 +1,31 @@
 <template>
   <div class="view-box container">
     <content class="content" />
+    <div v-if="book" class="book-directory">
+      <a :href="withBase('/' + book.href + '#book-contents')" :aria-label="'返回《' + book.bookTitle + '》目录'">
+        返回目录
+      </a>
+    </div>
     <Gitalk v-if="themeConfig.clientID"></Gitalk>
   </div>
 </template>
 <script setup lang="ts">
 import Gitalk from './Gitalk.vue'
 import { data as posts } from '../utils/posts.data'
-import { useData, useRoute } from 'vitepress'
+import { useData, useRoute, withBase } from 'vitepress'
 import { useStore } from '../store'
 const route = useRoute()
 const data = useData()
 const base = data.site.value.base
 const { state } = useStore()
-import { onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, watch } from 'vue'
+
+const book = computed(() => {
+  const directory = data.frontmatter.value.book
+  if (typeof directory === 'string') {
+    return posts.find((post) => post.bookTitle && post.href === 'posts/' + directory + '.html')
+  }
+})
 
 function getCurrpost() {
   let currPost = posts.findIndex((p) => p.href === route.path.replace(base, ''))
@@ -59,6 +71,28 @@ const themeConfig = useData().theme.value
   box-shadow: 0px 0px 8px rgb(var(--blue-shadow-color), 0.8);
   transition: opacity 0.5s ease-out, transform 1s cubic-bezier(0.61, 0.15, 0.26, 1), border 0.5s,
     background 0.5s, box-shadow 0.5s;
+}
+
+.book-directory {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+
+  a {
+    padding: 8px 16px;
+    border: 1px solid var(--pot-border-left);
+    border-radius: 999px;
+    color: var(--font-color-grey);
+
+    &:hover {
+      background-color: rgba(var(--blue-shadow-color), 0.12);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--icon-color);
+      outline-offset: 3px;
+    }
+  }
 }
 
 .content {
@@ -512,6 +546,134 @@ const themeConfig = useData().theme.value
 
   .custom-block-title {
     font-weight: bold;
+  }
+
+  .lesson-figure {
+    max-width: 820px;
+    margin: 24px auto;
+
+    a,
+    img {
+      display: block;
+    }
+
+    img {
+      height: auto;
+    }
+
+    figcaption {
+      margin-top: 8px;
+      font-size: 0.9em;
+      line-height: 1.6;
+    }
+  }
+
+  .article-nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 28px 0 4px;
+
+    > p {
+      display: contents;
+    }
+
+    .article-nav-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 76px;
+      padding: 12px 16px;
+      box-sizing: border-box;
+      border: 1px solid var(--pot-border-left);
+      border-radius: 16px;
+      background: linear-gradient(
+        var(--article-nav-angle, 110deg),
+        rgba(var(--blue-shadow-color), 0.12),
+        var(--foreground-color) 78%
+      );
+      color: var(--font-color-grey);
+      text-decoration: none;
+      transition: box-shadow var(--transition-time), transform var(--transition-time);
+
+      &:hover,
+      &:focus-visible {
+        box-shadow: 0 3px 12px rgba(var(--blue-shadow-color), 0.28);
+        transform: translateY(-2px);
+      }
+
+      &:focus-visible {
+        outline: 2px solid var(--icon-color);
+        outline-offset: 3px;
+      }
+
+      &::before,
+      &::after {
+        width: 9px;
+        height: 9px;
+        flex: 0 0 9px;
+        border: solid var(--icon-color);
+        border-width: 2px 2px 0 0;
+      }
+    }
+
+    .article-nav-prev::before {
+      content: '';
+      transform: rotate(-135deg);
+    }
+
+    .article-nav-next {
+      --article-nav-angle: 250deg;
+      grid-column: 2;
+      text-align: right;
+
+      &::after {
+        content: '';
+        transform: rotate(45deg);
+      }
+    }
+
+    .article-nav-text {
+      flex: 1;
+      min-width: 0;
+      overflow-wrap: anywhere;
+
+      small,
+      strong {
+        display: block;
+      }
+
+      small {
+        font-size: 13px;
+        line-height: 1.4;
+      }
+
+      strong {
+        margin-top: 4px;
+        line-height: 1.4;
+      }
+    }
+  }
+
+  @media (max-width: 600px) {
+    .article-nav {
+      grid-template-columns: minmax(0, 1fr);
+
+      .article-nav-next {
+        grid-column: 1;
+      }
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .article-nav .article-nav-card {
+      transition: none;
+
+      &:hover,
+      &:focus-visible {
+        transform: none;
+      }
+    }
   }
 
   /**

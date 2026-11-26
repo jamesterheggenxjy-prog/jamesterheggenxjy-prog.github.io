@@ -1,13 +1,17 @@
 <template>
-  <header :class="{ postViewer: state.currPost.href }" class="container">
+  <header :class="{ postViewer: state.currPost.href, compactHeader: compact }" class="container">
     <nav>
       <span class="logo">
         <img @dragstart.prevent src="../../assets/icon/navLogo.svg" alt="" />
       </span>
       <span class="menu">
         <ul>
-          <li v-for="item in menuList">
-            <a :href="base + item.url" @click="handleNavClick(item.url)">{{ item.name }}</a>
+          <li v-for="item in menuList" :key="item.url">
+            <a
+              :href="base + item.url"
+              :aria-current="page.relativePath === item.url + 'index.md' ? 'page' : undefined"
+              @click="handleNavClick(item.url)"
+            >{{ item.name }}</a>
           </li>
         </ul>
       </span>
@@ -29,9 +33,11 @@
 <script setup lang="ts">
 import { useData } from 'vitepress'
 
-const base = useData().site.value.base
-const themeConfig = useData().theme.value
-const menuList = themeConfig.menuList
+defineProps<{ compact?: boolean }>()
+
+const { site, page, theme } = useData()
+const base = site.value.base
+const menuList = theme.value.menuList
 
 import { useStore } from '../../store'
 const { state } = useStore()
@@ -120,9 +126,13 @@ header {
           transition: all 0.5s;
           transition: transform 0.8s cubic-bezier(0.25, 1, 0.5, 1);
 
+          &[aria-current='page'],
           &:hover {
             color: var(--font-color-gold);
             background-color: var(--btn-background);
+          }
+
+          &:hover {
             transform: translateY(-2px);
           }
         }
@@ -160,6 +170,10 @@ header {
   }
 }
 
+header.compactHeader {
+  height: clamp(220px, 42vh, 320px);
+}
+
 @media (max-width: 768px) {
   header {
     nav {
@@ -175,9 +189,11 @@ header {
     .menu {
       ul {
         li {
-          margin: 0 10px;
+          margin: 0 5px;
           a {
+            padding-inline: 10px;
             font-size: 16px;
+            white-space: nowrap;
           }
         }
       }
