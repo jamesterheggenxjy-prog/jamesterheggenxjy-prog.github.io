@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="470" viewBox="0 0 600 470" role="img" aria-labelledby="title">
+  <title id="title">Spectre v1 例题中的分支恢复和缓存请求</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L8 4 L0 8 Z" fill="#252525"/>
+    </marker>
+  </defs>
+  <rect width="600" height="470" fill="#fff"/>
+  <g fill="#f4f4f4" stroke="#252525" stroke-width="1.5">
+    <rect x="24" y="20" width="552" height="80" rx="3"/>
+    <rect x="24" y="148" width="552" height="172" rx="3" fill="#fff"/>
+    <rect x="43" y="186" width="243" height="84" rx="3"/>
+    <rect x="314" y="186" width="243" height="84" rx="3"/>
+    <rect x="24" y="374" width="263" height="76" rx="3"/>
+    <rect x="313" y="374" width="263" height="76" rx="3"/>
+  </g>
+  <g fill="none" stroke="#252525" stroke-width="1.5" marker-end="url(#arrow)">
+    <path d="M434 100 V184"/>
+    <path d="M109 270 V371"/>
+    <path d="M508 270 V371"/>
+    <path d="M242 270 V298 H290" stroke-dasharray="4 4"/>
+  </g>
+  <g fill="#191919" font-family="'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans SC', sans-serif" text-anchor="middle">
+    <g font-size="22" font-weight="700">
+      <text x="300" y="51">取指前端</text>
+      <text x="155" y="404">架构可见结果</text>
+      <text x="444" y="404">数据缓存</text>
+    </g>
+    <text x="44" y="174" font-size="18" font-weight="700" text-anchor="start">执行后端</text>
+    <g font-size="19">
+      <text x="300" y="79">预测 07 不跳转，取到 09</text>
+      <text x="164" y="212" font-weight="700">边界检查</text>
+      <text x="164" y="236">02 读取上界</text>
+      <text x="164" y="258">04 比较，07 确认跳转</text>
+      <text x="435" y="212" font-weight="700">加载单元</text>
+      <text x="435" y="236">09 用 rcx + r8 × 4</text>
+      <text x="435" y="258">算出地址 0x2044</text>
+      <text x="155" y="432">0d 返回 0</text>
+      <text x="444" y="432">0x2040 行若已填充可保留</text>
+    </g>
+    <g font-size="17">
+      <text x="380" y="130">预测路径</text>
+      <text x="379" y="304">撤销 09 的结果</text>
+      <text x="167" y="351">改道到 0d</text>
+      <text x="433" y="351">已发出读请求</text>
+    </g>
+  </g>
+</svg>
