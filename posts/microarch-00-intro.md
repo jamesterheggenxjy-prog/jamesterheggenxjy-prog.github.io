@@ -69,12 +69,14 @@ bookTitle: 微架构安全
 
 ### 第七章　瞬态执行
 
-沿指令读条件分支误预测与权限异常怎样产生瞬态活动。再沿一次正常系统调用计算两套页表的 CR3，并看返回时如何处理旧翻译。最后从 Linux 的地址空间切换理解预测屏障及其作用范围。
+先分别读清 Spectre v1 的边界检查和 Meltdown 的权限异常，再沿完整 C 代码逐段追踪训练、瞬态访问、缓存编码和结果恢复。之后再看页表隔离和其他变体，区分漏洞机制、缓解措施与适用范围。
 
 1. [Spectre v1 中的边界检查为何会被越过](./microarch-04d-spectre-v1.md)
-2. [Meltdown 中的越权加载如何影响后续指令](./microarch-04e-meltdown.md)
-3. [进入内核时怎样切换页表](./microarch-04f-page-table-isolation.md)
-4. [Spectre 变体中的分支与访存推测](./microarch-04c-variants.md)
+2. [Spectre v1：完整 PoC 源码讲解](./microarch-04g-spectre-v1-source.md)
+3. [Meltdown 中的越权加载如何影响后续指令](./microarch-04e-meltdown.md)
+4. [Meltdown：完整 PoC 源码讲解](./microarch-04h-meltdown-source.md)
+5. [进入内核时怎样切换页表](./microarch-04f-page-table-isolation.md)
+6. [Spectre 变体中的分支与访存推测](./microarch-04c-variants.md)
 
 读到例题时，先按题设复算一次，再对照手册确认哪些条件可以用于具体处理器。更换行长、替换策略或观察条件时，可以用原来的推理方法重新计算。 [微架构安全学习资料](./microarch-05-sources.md)
 
