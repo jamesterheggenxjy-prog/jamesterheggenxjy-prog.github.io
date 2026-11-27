@@ -28,13 +28,17 @@ bookTitle: 微架构安全
 4. [缓存未命中后如何合并请求](./microarch-01a-mshr.md)
 5. [写入缓存后，数据什么时候送到下一级](./microarch-01e-cache-stores.md)
 6. [缓存一致性：两个核怎样读到最新值](./microarch-01f-coherence.md)
+   - [生产者怎样用就绪标志发布数据](./microarch-01f-coherence.html#coherence-release-acquire){target=_self}
+   - [怎样证明栅栏排除了两个旧值](./microarch-01f-coherence.html#coherence-fence-order){target=_self}
 7. [两个线程改不同字段，为什么缓存行还会来回传](./microarch-01g-false-sharing.md)
+   - [只读字段也会被迫重新加载](./microarch-01g-false-sharing.html#sharing-read-write){target=_self}
 
 ### 第二章　硬件预取器
 
 先从三次访问算出步长和候选地址，再跟踪候选怎样过页、排队和填充。随后到 RTL 一节，逐拍看缓存接收与拒绝怎样改变暂存槽。
 
 1. [硬件预取器怎样工作](./microarch-02-prefetch.md)
+   - [两个请求者执行同一条加载时怎样选表](./microarch-02-prefetch.html#prefetch-requestor-tables){target=_self}
 2. [预取器和数据缓存怎样握手](./microarch-02d-prefetch-rtl.md)
 
 ### 第三章　地址翻译
@@ -42,13 +46,16 @@ bookTitle: 微架构安全
 先用一个地址走完三级页表，再看 TLB 缓存哪些翻译结果。两个核都用过同一个映射时，沿着页表写入、本地同步和远端确认，判断何时可以回收旧页。
 
 1. [处理器怎样用页表和 TLB 翻译地址](./microarch-02a-translation.md)
+   - [监管者怎样读取用户页](./microarch-02a-translation.html#sv39-sum-mxr){target=_self}
 
 ### 第四章　指令执行与分支预测
 
 先跟踪一条指令从执行到退休，再用存储队列例题，判断一次读取该从哪里取数，以及地址迟到时核心怎样重执行。把视线移到前端后，沿同一次取指学习目标、方向和历史各自怎样参与预测，再用同一个分支例题区分重定向、历史恢复与方向表训练。
 
 1. [乱序执行怎样按程序顺序退休](./microarch-03-execution.md)
+   - [两条加载都出错时，先报告哪一条](./microarch-03-execution.html#ooo-oldest-exception){target=_self}
 2. [加载怎样从存储队列拿到数据](./microarch-03d-load-store.md)
+   - [两条加载读同一个字，为什么也要互相检查](./microarch-03d-load-store.html#lsu-load-load-order){target=_self}
 3. [分支预测器怎样决定下一次取指](./microarch-03a-fetch-prediction.md)
 
 ### 第五章　计时与证据
@@ -64,12 +71,16 @@ bookTitle: 微架构安全
 
 1. [不同的数据为什么会在末级缓存里互相挤掉](./microarch-06a-shared-cache.md)
 2. [未命中次数相同，为什么内存等待更长](./microarch-06b-memory-queue.md)
+   - [一个读包跨两个存储体，要等哪一半](./microarch-06b-memory-queue.html#memory-split-bank-response){target=_self}
 3. [划分末级缓存的路能隔离什么](./microarch-06c-cat.md)
+   - [任务换组后，旧组的占用为什么还在](./microarch-06c-cat.html#cat-rmid-occupancy){target=_self}
 4. [同核多线程怎样安排任务](./microarch-06d-core-scheduling.md)
+   - [同组任务进入内核时，另一侧在做什么](./microarch-06d-core-scheduling.html#core-kernel-context){target=_self}
 
 ### 第七章　DRAM 扰动与硬件错误
 
 1. [DRAM 行被反复打开时，邻近数据为何会翻转](./microarch-07a-rowhammer.html){target=_self}
+   - [读到的数据已经纠正，为什么还要写回](./microarch-07a-rowhammer.html#rowhammer-ecc-scrub){target=_self}
    - [ECC 怎样知道该翻回哪一位](./microarch-07a-rowhammer.html#rowhammer-ecc-codeword){target=_self}
 
 ### 第八章　瞬态执行
