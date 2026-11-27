@@ -67,7 +67,12 @@ bookTitle: 微架构安全
 3. [划分末级缓存的路能隔离什么](./microarch-06c-cat.md)
 4. [同核多线程怎样安排任务](./microarch-06d-core-scheduling.md)
 
-### 第七章　瞬态执行
+### 第七章　DRAM 扰动与硬件错误
+
+1. [DRAM 行被反复打开时，邻近数据为何会翻转](./microarch-07a-rowhammer.md){target=_self}
+   - [ECC 怎样知道该翻回哪一位](./microarch-07a-rowhammer.md#rowhammer-ecc-codeword){target=_self}
+
+### 第八章　瞬态执行
 
 先分别读清 Spectre v1 的边界检查和 Meltdown 的权限异常，再沿完整 C 代码逐段追踪训练、瞬态访问、缓存编码和结果恢复。之后再看页表隔离和其他变体，区分漏洞机制、缓解措施与适用范围。
 
