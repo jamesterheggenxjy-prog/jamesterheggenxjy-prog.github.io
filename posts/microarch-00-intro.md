@@ -84,6 +84,7 @@ bookTitle: 微架构安全
    - [用四路模型算出一次 TLB 驱逐](./microarch-04i-tlb-observation.md#tlb-four-way-eviction)
    - [两代 Intel 处理器的 TLB 结构实测](./microarch-04i-tlb-observation.md#tlb-intel-measurement)
    - [二级 TLB 命中和页表遍历怎样分别计数](./microarch-04i-tlb-observation.md#tlb-walk-events)
+   - [地址空间标签怎样与替换竞争同时存在](./microarch-04i-tlb-observation.md#tlb-tagged-competition)
 
 ### 第六章　共享资源与隔离
 
