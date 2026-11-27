@@ -174,6 +174,36 @@ B 组    L3:0=8;1=f
 四路中先给根组和 B 各留一路，A 最多保留两路。一组可行的配置是 A 用 `3`，根组用 `4`，B 用 `8`。再回到三个块依次读入同一组的例子，A 只有两路，下一轮按原顺序读三个块时全部未命中。分区消除了这三组之间对填充位置的争用，同时改变了 A 自己的替换结果。
 :::
 
+### 同一个任务取指和读数据，分别用哪份掩码 {#cat-cdp}
+
+前面的 `L3:0=7` 为域 0 的指令和数据填充提供同一份掩码。在支持并启用 CDP（Code and Data Prioritization，代码与数据优先级）的 Intel 处理器上，一个 CLOS 可以有两份掩码。Linux `resctrl` 用 `L3CODE` 和 `L3DATA` 分别表示它们。调度器仍给线程设置一个 CLOSID。请求到达 LLC 而且需要分配时，再按所属的 L3 域和请求类别使用其中一份掩码。
+
+沿用域 0、CLOSID 2 和四路缓存，假设 A 组的 `schemata` 在域 0 有如下两项。这里只列例题用到的域。
+
+```text
+L3CODE:0=c
+L3DATA:0=6
+```
+
+Linux v6.12 的 x86 实现将同一个 CLOSID 配到相邻两项。在域 0，数据掩码 `6` 写入下标 `2 × 2 = 4`，代码掩码 `c` 写入下标 `2 × 2 + 1 = 5`。`IA32_PQR_ASSOC` 中的 CLOSID 仍为 2。每个 CLOS 占两项也会减少该资源可用的等级数。例如原来有 16 个可用掩码下标，成对使用后可表示 8 个等级，其中包含根组使用的 0 号。内核为控制组分配 CLOSID 时，还会取各已启用资源支持数量中的最小值。
+
+现在观察一个空组。指令块 I 和数据块 D0、D1 是三个不同的物理块，地址恰好选中同一组。请求都需要填入 LLC，并依次完成。题设有空路时取允许的最小路号，没有空路时用精确 LRU。
+
+| 请求 | 允许分配的路 | 填充结果 |
+| --- | --- | --- |
+| 取指请求 I | `c`，路 2、3 | 填入空的路 2 |
+| 数据读取 D0 | `6`，路 1、2 | 填入空的路 1 |
+| 数据读取 D1 | `6`，路 1、2 | 两路已满。路 2 的 I 更早使用，D1 替换 I |
+
+`c & 6 = 4`，重叠的是路 2。虽然系统分别记录代码和数据掩码，这一位仍指向同一组里的同一位置。读 D1 时，路 3 虽然空着，却没有包含在数据掩码中。仅凭配置里出现两行，无法判断取指和数据填充能否互相替换。
+
+::: details 练习｜只把代码掩码改成 `8`
+
+让缓存重新从空组开始，保持相同的三个请求和数据掩码 `6`。D1 还会换掉 I 吗？如果只是现场修改 `schemata`，组中原有的 I 在路 2，又会怎样？
+
+从空组重做时，I 填路 3，D0 填路 1，D1 填仍空着的路 2，三块都能保留。若直接修改配置，路 2 中的旧 I 不会因此迁到路 3。它仍可能被新的数据填充换掉。等 I 再次未命中并需要填充时，才按新代码掩码选择路 3。
+:::
+
 ### 任务换组后，旧组的占用为什么还在 {#cat-rmid-occupancy}
 
 CLOS 选择分配配置，RMID（Resource Monitoring ID，资源监测编号）用于汇总监测事件。把线程从一组迁到另一组以前，旧组可能已经积累了缓存占用。迁组后立刻查看两个组，旧组的占用可以暂时保留，新组则要等新的缓存行被计入。命中原先缓存的行并不会把旧占用自动转记到新监控组。对照[前面的旧行命中](#cat-resident)，第 1 步可以读到 A0，第 3 步才有一次使用新掩码的分配。
@@ -371,6 +401,8 @@ four blocks, mask=f: second lap 4/4
 - [Intel CAT 的服务等级与缓存空间分配](https://www.intel.com/content/www/us/en/developer/articles/technical/introduction-to-cache-allocation-technology.html)
 - [Intel RDT 架构规范，CLOS、RMID 和容量掩码](https://cdrdv2-public.intel.com/851356/356688-004-intel-rdt-architecture-spec.pdf)
 - [Linux v6.12 resctrl 文档，分配规则、组切换和缓存占用](https://docs.kernel.org/6.12/arch/x86/resctrl.html#resource-allocation-rules)
+- [Linux v6.12 resctrl 文档，启用 CDP 后的 L3 配置格式](https://docs.kernel.org/6.12/arch/x86/resctrl.html#l3-schemata-file-details-cdp-enabled-via-mount-option-to-resctrl)
+- [Linux v6.12 x86 的 CDP 掩码下标计算](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/resctrl/ctrlmondata.c#L251-L261) · [启用 CDP 后的等级数量](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/resctrl/rdtgroup.c#L2408-L2421)
 - [Linux v6.12 resctrl 文档，MBM 事件与带宽计数配置](https://docs.kernel.org/6.12/arch/x86/resctrl.html#filesystem-interface)
 - [Linux v6.12 x86 调度时更新 IA32_PQR_ASSOC 的源码](https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/asm/resctrl.h#L95)
 - [Linux v6.12 resctrl 独占模式的逐域检查](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/resctrl/rdtgroup.c#L1241-L1284)
