@@ -69,8 +69,8 @@ bookTitle: 微架构安全
 
 ### 第七章　DRAM 扰动与硬件错误
 
-1. [DRAM 行被反复打开时，邻近数据为何会翻转](./microarch-07a-rowhammer.md){target=_self}
-   - [ECC 怎样知道该翻回哪一位](./microarch-07a-rowhammer.md#rowhammer-ecc-codeword){target=_self}
+1. [DRAM 行被反复打开时，邻近数据为何会翻转](./microarch-07a-rowhammer.html){target=_self}
+   - [ECC 怎样知道该翻回哪一位](./microarch-07a-rowhammer.html#rowhammer-ecc-codeword){target=_self}
 
 ### 第八章　瞬态执行
 
