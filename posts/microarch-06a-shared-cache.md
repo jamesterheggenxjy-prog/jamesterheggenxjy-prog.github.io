@@ -82,6 +82,27 @@ B 读 `0x2400`（B1）时，组 0 没有空路，LRU 选中 `0x2000`（A0）。�
 
 gem5 v24.1.0.3 的 Ruby `MESI_Two_Level` 用私有 L1 和共享 L2 实现了这一过程。假定 A0 是共享层中处于 `SS` 的干净行。L2 为这次换出建立事务记录，按 `Sharers` 给潜在持有者发送失效，并释放数据阵列中的表项。此后 A0 仍有一项在途状态 `I_I`，用来收取失效确认。收齐后才继续下游的替换收尾。**数据阵列的槽位可以先释放，A0 这笔事务还在等待确认。** 这个实现有助于理解前表中 A0 为什么会消失在私有缓存中。前表用的是私有 L2 与共享 LLC，层级名称随系统而变。
 
+### 如果被换出的行在私有缓存里已经改过 {#llc-dirty-victim}
+
+仍让 B1 的读请求选中 A0（`0x2000`）作为牺牲行。现在改变初态：A 已经取得 A0 的写权限，把行首的字从 5 改成 9，最新数据仍在 A 的私有缓存。按照 gem5 Ruby `MESI_Two_Level` 的命名，共享 L2 用 `MT` 记录已有独占持有者，它保存的数据可能已经过期。因而这次失效还必须把最新数据带回来。
+
+| 事件 | 共享层对 A0 的状态 | 最新值 9 在哪里 |
+| --- | --- | --- |
+| A 写完 A0 | `MT`，目录记着私有持有者 | A 的私有缓存 |
+| B1 引发替换 | 分配临时事务记录（TBE），向持有者发失效，释放 A0 的共享层阵列项，转为 `MT_I` | 仍在 A，或已随回复发出 |
+| A 的脏数据回复到达 | 最新整行进入 TBE，再向内存侧发送写回，转为 `M_I` | 正由写回事务转交 |
+| 内存侧确认写回 | A0 的换出事务结束 | 由下游保存 |
+
+表中的 `MT_I` 和 `M_I` 属于 A0。它们分别等待私有持有者交还数据和内存侧确认写回。共享层腾出了存放 A0 的路，仍须靠 TBE 保留换出进度。若在这两个状态中又收到对 A0 的读请求，源码会暂缓该请求，避免用旧副本回答。B 发起的依旧只是 B1 的读，但为了回收一路，控制器另外处理了 A0 的整行写回。和[经典缓存的写缓冲](./microarch-01e-cache-stores.md#write-back-retry)一样，数据离开阵列之后，仍需追踪谁对最新值负责。
+
+::: details 练习｜A 在 B1 到达前已经交还脏行
+
+若私有缓存先把 A0 的最新数据交给共享 L2，共享层已经进入 `M`，而且题设仍选 A0 为牺牲行，换出还需要等哪一级？
+
+最新数据已在共享 L2，没有私有副本需要撤销。控制器可以直接把共享层保存的整行交给内存侧，进入 `M_I` 等写回确认，省掉等待私有持有者交还数据的步骤。
+
+:::
+
 ### 用代码复算请求最后在哪一级取数
 
 这段 C 程序用 `private_copy[core][block]` 记录每个核手里有哪些块，用 `llc` 保存每组的块号，最久未使用的块排在最前。`read_block` 先查私有缓存，命中时直接返回，LLC 的顺序保持原样。到达 LLC 后，命中就把该块移到队尾，需要替换就从队首移走一块。在包含式模型里，移除队首还会清除对应的私有副本。这里把发失效到收齐确认合并成一步，两种情况都只模拟干净行，不计在途延迟。
@@ -190,7 +211,20 @@ only B0 and B1: L2=0 LLC requests=3 LLC hits=0 lower=3
 
 ## 从请求数和未命中数读出变化 {#llc-evidence}
 
-复查真实程序时，先固定工作量和执行位置，再比较各级事件。假如 A 单独运行和混合运行都执行了同样的加载，但到达 LLC 的请求数不同，应先看私有层的命中和副本状态。若到达 LLC 的请求数相同，混合运行的 LLC 未命中更多，则可沿同组替换的解释继续查。若未命中数也相同，仍可能是这些请求去了[共用的内存控制器](./microarch-06b-memory-queue.md#memory-controller)，等了更久。各类硬件计数的实际定义和范围可对照[用计时和计数器分析访存](./microarch-04a-measurement.md#pmu-path)。
+把计数窗口定在 A 的第二轮读取，只数 A0、A1、A2 这三次需求加载。假设三次加载串行执行，每次 LLC 未命中各产生一笔已被下级接收的读请求。下表前三行复用本篇模型的输出，末行是额外的排队题设。
+
+| 第二轮开始时的条件 | A 的加载 | 到达 LLC | LLC 未命中 | 到达下级 |
+| --- | ---: | ---: | ---: | ---: |
+| A 的三份私有副本都保留 | 3 | 0 | 0 | 0 |
+| 清空 A 的私有副本，B 只反复读 B0 | 3 | 3 | 0 | 0 |
+| 清空 A 的私有副本，B 依次读 B0、B1、B2 | 3 | 3 | 3 | 3 |
+| 同上一行，下级已有其他请求排队 | 3 | 3 | 3 | 3 |
+
+第一行和第二行的 LLC 未命中都为零，但未命中率的含义不同。第一行没有请求到达 LLC，分母为零。第二行有三次请求，全部在 LLC 命中。把第二行和第三行相比，到达 LLC 的请求数仍是三，可以把新增的下行请求追到 LLC 的同组替换。
+
+第三行和第四行的计数完全相同。若题设中下级每次需要 20 周期，从被接收到返回，三次串行加载合计在下级花 60 周期。若第四行的第一笔请求还要在下级排 6 周期，后两笔照旧，下级这部分就变为 `(6 + 20) + 20 + 20 = 66` 周期。这里的 6 周期发生在下级接收请求之后，因此不会改变表中的接收次数。请求重叠时，逐项延迟相加也无法直接给出整个循环的用时。
+
+复查真实程序时，先固定工作量和执行位置，再按同一个窗口对照加载、LLC 请求、下级接收和返回。下级请求可能合并，硬件事件也可能将预取、写回或其他核心的活动算进去。核对计数口径可读[访存计数一节](./microarch-04a-measurement.md#pmu-path)，要继续追踪请求在哪里排队，可读[内存控制器一节](./microarch-06b-memory-queue.md#memory-controller)。
 
 ::: details 练习：B 反复读同一个块
 
@@ -201,18 +235,34 @@ only B0 and B1: L2=0 LLC requests=3 LLC hits=0 lower=3
 再把条件改成包含式 LLC，且 A 的私有副本一开始都在，B 只各读一次 B0、B1。B1 换出 A0 后，A1、A2 都还在私有层。A 重新填入 A0 时换出 A1，重新填入 A1 时又换出 A2。因此 B 直接换出一块，A 最终仍出现三次 LLC 未命中。
 :::
 
+### LLC 未命中是否等于 DRAM 读取？ {#llc-miss-source}
+
+不等于。LLC 未命中事件首先说明所选事件定义的一次查找没有在 LLC 满足请求，它本身不说明数据最终来自哪里，也不等于一条 DRAM 读命令。请求可能与已有的缺失事务合并，也可能由更下层缓存或其他转发路径满足。不同处理器的事件还可能分别统计需求加载、缓存行填充或总线事务，计数单位需要查该处理器的事件定义。
+
+例如，LLC 标签查找未命中后，内存控制器可能用写队列中已经接收的数据满足读取，而不为被覆盖的部分发 DRAM 列读。若要判断 DRAM 流量，可以同时观察内存控制器的读命令或数据量事件，并核对时间窗口、内存域和事件定义。控制器事件通常覆盖整个控制器或通道，可能包含其他核心、设备和内核活动，不能默认按任务或核心过滤。仅凭 LLC 未命中数与程序耗时，不能计算某个任务的 DRAM 读取次数。写队列逐段覆盖的例题见[内存控制器一课](./microarch-06b-memory-queue.md#memory-write-queue-read)。
+
+假设一次窗口中 A 的 LLC 事件报告 100 次需求读未命中，同期某控制器报告 160 个读突发。这两个数各自有明确的观察对象。前者是题设中为 A 选择的缓存事件，后者包含这个控制器处理的所有来源。即便窗口完全重合，也不能把 160 次全部归给 A。还要核对 A 的请求是否都经过该控制器、控制器是否同时处理其他请求，以及一个上游请求是否拆成多个突发。
+
+::: details 练习｜背景流量不变时的差值
+
+另做一次独立测量，A 不运行，保持其余条件尽可能一致，控制器报告 60 个读突发。能否将 `160 − 60 = 100` 直接认定为 A 的精确读突发数？
+
+差值可作为分析线索，但它依赖背景流量在两次运行中相同。A 运行可能改变其他任务的排队、调度或缓存行为，两次窗口的后台流量也可能自然波动。重复测量、记录控制器范围和后台条件，才能评估差值能支持多强的结论。
+:::
+
 ## 参考文献
 
 - [Marjan Fariborz，gem5 Bootcamp《Cache Systems》第 14 页](https://gem5bootcamp.github.io/gem5-bootcamp-env/assets/slides/using-gem5-04-gem5-caches-tutorial.pdf#page=14) · [CC BY 4.0 许可](https://github.com/gem5bootcamp/gem5-bootcamp-env/blob/51590ae00b0e451c9b6a8854addbb94128ab4cac/LICENSE) · 本文复用已裁出的图并以灰度显示。
 - [Intel 第一代 Xeon Scalable 技术综述，缓存层次与数据放置](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-xeon-processor-scalable-family-technical-overview.html)
 - [Sorin、Hill、Wood，缓存一致性教材，包含式 LLC 与失效请求](https://pages.cs.wisc.edu/~markhill/papers/primer2020_2nd_edition.pdf)
+- [gem5 v24.1.0.3，Ruby 共享 L2 的 `MT`、`MT_I` 和 `M_I` 转换](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/ruby/protocol/MESI_Two_Level-L2cache.sm)
 - [gem5 v24.1.0.3 Ruby 的 L2 换出与失效确认状态机](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/ruby/protocol/MESI_Two_Level-L2cache.sm)
 - [Linux v6.12 resctrl 文档中的缓存实例 ID](https://docs.kernel.org/6.12/arch/x86/resctrl.html#cache-ids)
 - [Linux 内核的缓存 sysfs 接口定义](https://github.com/torvalds/linux/blob/v6.12/Documentation/ABI/testing/sysfs-devices-system-cpu)
 
 <nav class="article-nav" aria-label="系列文章导航">
 
-[<span class="article-nav-text"><small>上一篇</small><strong>时间差何时算作侧信道证据</strong></span>](./microarch-04b-observation.md){.article-nav-card .article-nav-prev rel=prev}
+[<span class="article-nav-text"><small>上一篇</small><strong>一次缓存计时能说明什么</strong></span>](./microarch-04b-observation.md){.article-nav-card .article-nav-prev rel=prev}
 
 [<span class="article-nav-text"><small>下一篇</small><strong>未命中次数相同，为什么内存等待更长</strong></span>](./microarch-06b-memory-queue.md){.article-nav-card .article-nav-next rel=next}
 
