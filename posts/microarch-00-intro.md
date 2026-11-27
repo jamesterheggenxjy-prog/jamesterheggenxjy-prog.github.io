@@ -45,6 +45,7 @@ bookTitle: 微架构安全
    - [沿主例数一数槽位](./microarch-01a-mshr.md#mshr-capacity-trace)
    - [读请求发出后，同一行又来了写请求](./microarch-01a-mshr.md#mshr-read-then-write)
    - [取得写权限后，哪些字节真正变了](./microarch-01a-mshr.md#mshr-write-byte-trace)
+   - [跨行加载的两部分可以各走一条路](./microarch-01a-mshr.md#mshr-split-load)
 5. [写入缓存后，数据什么时候送到下一级](./microarch-01e-cache-stores.md)
    - [写回被拒绝后，同一行的读取要等到哪一步](./microarch-01e-cache-stores.md#write-back-retry)
    - [被替换的行怎样重新组成写回地址](./microarch-01e-cache-stores.md#writeback-address)
