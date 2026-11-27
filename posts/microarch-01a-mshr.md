@@ -159,6 +159,28 @@ gem5 将这两种容量分别暴露为 `mshrs` 和 `tgts_per_mshr`。它的经�
 
 :::
 
+### 下一级拒收以后，重试还会发原来的包吗 {#mshr-send-retry}
+
+仍用 R1 读 `0x1044`、W2 写 `0x1064`。两笔请求落在块 A，但只有 W2 需要写权限。上一题假设第 12 周期的读请求已经被下一级接受。这次只改一处：下行端口第 12 周期不接收，直到第 20 周期才通知可重试。假定本级仍可接收 W2，表项有空余目标槽，期间没有影响 A 的一致性请求，端口恢复后 A 是唯一可发的请求。
+
+gem5 v24.1.0.3 的经典缓存把原始等待者留在 MSHR 中。`sendMSHRQueuePacket` 每次发送前会用当前缓存块状态和表项的 `needsWritable()` 构造下行包。在接收方拒绝时，这个临时包被删除，A 的表项和等待者还在，`inService` 也没有置位。端口要等重试通知才能再次尝试发送。对这条行而言，等待的内容仍可以改变。
+
+| 周期 | A 的表项 | 下行端口产生的结果 |
+| ---: | --- | --- |
+| 10 | `targets` 收下 R1，尚不需要写权限 | 等待首次发送 |
+| 12 | 仍保存 R1，`inService = false` | 取可读数据的临时包被拒绝并丢弃 |
+| 15 | `inService` 仍为假，W2 加入 `targets`，表项开始要求写权限 | 端口仍等重试通知 |
+| 20 | 仍用 A 的原表项跟踪 R1、W2 | 重建下行包，申请整行和写权限。成功交给下一级后才标记 `inService = true` |
+
+若第 20 周期发出的请求成功取回可写行，就可以服务 R1 和 W2。R1 从偏移 4 至 7 得到 `0x07060504`，W2 把偏移 36 至 39 改成 `ef be ad de`。整个过程有两次发送尝试，只有一次成功交给下一级。MSHR 表项也只分配了一次。
+
+::: details 练习｜把 W2 移到重试成功之后
+
+只把 W2 的到达时刻改为第 21 周期，并且规定第 20 周期发出的读最终只返回可读副本。W2 还能改变这笔下行请求吗？
+
+第 20 周期构造包时，表项只有 R1，没有要求写权限。第 21 周期 W2 到达时，`inService` 已经置位，当前事务也没有可直接用于 W2 的写权限。W2 进入 `deferredTargets`。读响应先满足 R1，表项还要再发一轮权限请求。要区分这两条路径，应看下一级什么时候接受了读取，以及 W2 到达时表项能否把写权限并入这轮请求。
+:::
+
 ### 跨行加载的两部分可以各走一条路 {#mshr-split-load}
 
 [缓存行与局部性一课](./microarch-01-cache.md#locality-cross-line)把从 `0x103e` 开始的四字节加载拆成两部分。这里沿用那道题的时序，看看每部分是否需要占一个 MSHR 槽。第 18 周期，另一条加载已经发出对行 `0x1040` 的请求。跨行加载于第 20 周期到达，前半在第 22 周期从已驻留的行 `0x1000` 取得 `11 22`。后半需要行 `0x1040`，因此要查看已有事务的等待者列表。
@@ -371,6 +393,7 @@ R2 直接从本级取出偏移 36 至 39，此时 A 的 MSHR 表项已经释放�
 ## 参考文献
 
 - [gem5 v24.1.0.3 的等待者分流与权限提升](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/mshr.cc#L348)
+- [gem5 v24.1.0.3 构造下行包、拒绝后丢包及接受后标记在途](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/base.cc#L1769-L1816)
 - [gem5 v24.1.0.3 的回包处理与延后请求重发](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/base.cc#L526)
 - [gem5 经典缓存的组织](https://www.gem5.org/documentation/general_docs/memory_system/classic_caches/)
 - 图 1、图 2 来自 Djordje Kovacevi 的 gem5 内存系统文档，本站版本转为灰度、补白底与边距，图 2 截取原图的 MSHR 部分。[原文与原图](https://www.gem5.org/documentation/general_docs/memory_system/gem5_memory_system/#mshr-and-write-buffer-queues) · [原站 MIT 许可](/microarch/gem5-website-license.txt)
