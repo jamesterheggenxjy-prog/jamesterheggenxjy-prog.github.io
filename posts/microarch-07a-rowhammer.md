@@ -14,7 +14,7 @@ book: microarch-00-intro
 
 处理器的物理地址还要经过内存控制器的映射，才能选到通道、rank、bank、行和列。**Rank** 通常由多个 DRAM 芯片并排组成，共同提供一次访问所需的数据位宽。每个 bank 有自己的行缓冲；同一 bank 同一时刻只能保持一条打开的行，不同 bank 则可能并行工作。芯片内部还可能有子阵列和备用行，逻辑 bank、row 编号未必直接暴露物理排布。
 
-图中把一个 bank 的三条物理相邻行画在一起。每个小格代表一个存储单元，横向字线（wordline，WL）控制同一行的访问晶体管，纵向位线（bitline，BL）把单元连接到感应放大器。实际 DRAM 阵列更大，行内的列、子阵列、备用行与地址重映射均被省略。
+图中把一个 bank 的三条物理相邻行画在一起。先沿中间一行的横向字线（wordline，WL）看过去，它同时控制这一行各个小格里的访问晶体管。再选一列，沿纵向位线（bitline，BL）向下，就能找到该列连接的感应放大器。右侧放大了一个小格，字线接到访问晶体管的控制端，晶体管导通时才会把位线接到电容的存储端。图中省略了实际阵列的互补位线、其余列、子阵列及地址重映射。
 
 <figure class="lesson-figure">
 <a href="/microarch/dram-row-disturbance.svg" aria-label="查看 DRAM 行与邻行扰动结构图"><img src="/microarch/dram-row-disturbance.svg" alt="一个 DRAM bank 中上下攻击行夹着受扰行，显示字线、位线和行缓冲感应放大器；旁边放大一个晶体管与电容组成的存储单元" width="1120" height="520" loading="lazy" decoding="async"></a>
@@ -242,6 +242,7 @@ AMD PG313 文档把前台触发的修复称为 **on-the-fly scrubbing**。正常
 - [GPUThor：非均匀访问模式与 ECC 保护的 GPU，ACM CCS 2026](https://gputhor.com/)
 - [AMD UG586，内存控制器的 ECC 编码、解码和错误状态](https://docs.amd.com/r/en-US/ug586_7Series_MIS/Error-Correcting-Code)
 - [AMD PG313，按需 ECC 修复和后台内存巡检](https://docs.amd.com/r/en-US/pg313-network-on-chip/ECC-Scrubbing)
+- [MIT 6.004，单晶体管 DRAM 单元的字线、位线和电容](https://ocw.mit.edu/courses/6-004-computation-structures-spring-2017/pages/c14/c14s1/)
 - [内存控制器怎样选择 DRAM 行与列命令](./microarch-06b-memory-queue.md#memory-row)
 - [地址怎样映射到 DRAM 的 bank 和 row](./microarch-06b-memory-queue.md#memory-address-mapping)
 

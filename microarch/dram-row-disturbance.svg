@@ -21,29 +21,39 @@
   <text x="174" y="178" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14" fill="#222">字线 WL(r−1)</text>
   <text x="174" y="251" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14" font-weight="700" fill="#222">字线 WL(r)</text>
   <text x="174" y="324" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14" fill="#222">字线 WL(r+1)</text>
+  <g fill="none" stroke="#333" stroke-width="1.5">
+    <path d="M282 173H337M369 173H397M429 173H457M489 173H517M282 246H337M369 246H397M429 246H457M489 246H517M282 319H337M369 319H397M429 319H457M489 319H517"/>
+    <path d="M365 153V389M425 153V389M485 153V389M545 153V389" stroke="#666"/>
+  </g>
   <g fill="#fff" stroke="#222" stroke-width="1.5">
     <rect x="337" y="160" width="28" height="26" rx="3"/><rect x="397" y="160" width="28" height="26" rx="3"/><rect x="457" y="160" width="28" height="26" rx="3"/><rect x="517" y="160" width="28" height="26" rx="3"/>
     <rect x="337" y="233" width="28" height="26" rx="3"/><rect x="397" y="233" width="28" height="26" rx="3"/><rect x="457" y="233" width="28" height="26" rx="3"/><rect x="517" y="233" width="28" height="26" rx="3"/>
     <rect x="337" y="306" width="28" height="26" rx="3"/><rect x="397" y="306" width="28" height="26" rx="3"/><rect x="457" y="306" width="28" height="26" rx="3"/><rect x="517" y="306" width="28" height="26" rx="3"/>
   </g>
-  <g stroke="#555" stroke-width="1.5"><path d="M351 138V405M411 138V405M471 138V405M531 138V405"/></g>
-  <rect x="320" y="405" width="232" height="28" rx="4" fill="#e5e5e5" stroke="#333"/>
-  <text x="436" y="424" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13" fill="#222">各位线连接一组感应放大器（行缓冲）</text>
-  <path d="M580 198L602 216M580 294L602 276" fill="none" stroke="#222" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="585" y="245" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13" fill="#222">反复 ACT/PRE</text>
+  <text x="176" y="374" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14" fill="#222">位线 BL</text>
+  <path d="M234 370H363" fill="none" stroke="#777" stroke-width="1.25" stroke-dasharray="4 3"/>
+  <g fill="#e5e5e5" stroke="#333" stroke-width="1.5">
+    <rect x="348" y="389" width="34" height="18" rx="3"/>
+    <rect x="408" y="389" width="34" height="18" rx="3"/>
+    <rect x="468" y="389" width="34" height="18" rx="3"/>
+    <rect x="528" y="389" width="34" height="18" rx="3"/>
+  </g>
+  <text x="455" y="429" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14" fill="#222">感应放大器（行缓冲）</text>
+  <path d="M585 198L605 216" fill="none" stroke="#222" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M585 294L605 276" fill="none" stroke="#222" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="608" y="250" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14" fill="#222">扰动</text>
 
   <rect x="712" y="104" width="372" height="344" rx="6" fill="#fafafa" stroke="#555" stroke-width="1.5"/>
   <text x="734" y="132" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="700" fill="#222">一个存储单元：1 个晶体管 + 1 个电容</text>
   <text x="755" y="190" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="15" fill="#222">字线 WL 控制访问晶体管的栅极</text>
   <path d="M765 206H1015M858 206V246H850V266" fill="none" stroke="#222" stroke-width="2"/>
   <text x="790" y="258" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13" fill="#222">位线 BL</text>
-  <path d="M790 264V368M790 300H812M888 300H918" fill="none" stroke="#222" stroke-width="2"/>
+  <path d="M790 264V350M790 300H812M888 300H945" fill="none" stroke="#222" stroke-width="2"/>
   <rect x="812" y="270" width="76" height="60" rx="4" fill="#e8e8e8" stroke="#222" stroke-width="2"/>
   <text x="850" y="295" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13" fill="#222">访问</text>
   <text x="850" y="314" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13" fill="#222">晶体管</text>
-  <rect x="918" y="277" width="62" height="46" rx="4" fill="#fff" stroke="#222" stroke-width="2"/>
-  <text x="949" y="305" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14" fill="#222">电容</text>
-  <path d="M949 323V356M918 356H980M926 364H972M934 372H964" fill="none" stroke="#222" stroke-width="1.5"/>
-  <path d="M760 380H1016" fill="none" stroke="#555" stroke-width="1.5"/>
+  <text x="952" y="269" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="15" fill="#222">存储电容</text>
+  <path d="M945 283V317M958 283V317M958 300H1017V329" fill="none" stroke="#222" stroke-width="2"/>
+  <text x="1017" y="350" text-anchor="middle" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13" fill="#222">参考电位</text>
   <text x="752" y="410" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13" fill="#444">电容电荷表示 0 或 1；读出后由感放恢复。</text>
 </svg>
