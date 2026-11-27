@@ -214,6 +214,32 @@ gem5 v24.1.0.3 把已构造预取包的待发队列记为 `pfq`，把等翻译�
 
 图中的 0x1280 在第 201 周期已经能取，但第 210 周期才真正向下发出。两者之间的 9 周期来自本例的本地资源与仲裁。返回时，缓存控制器需要用 MSHR 找到地址和等待者。可缓存的响应按策略填入数据阵列，再为已经等待的需求提供所需字节。如果需求在填充后到达，就从正常的标记与数据阵列走命中路径。
 
+### MSHR 还有空项，为什么预取仍要等 {#prefetch-mshr-reserve}
+
+把 `0x1280` 在队列中等待的 9 个周期具体化。gem5 经典缓存构造 MSHR 队列时，`mshrs` 决定队列容量，`demand_mshr_reserve` 给出需求预留参数。缓存侧用于选取预取包的 `canPrefetch()` 读取的是**已经分配的项数** `allocated`，其中包括已经发往下级、仍在等待返回的事务。它在所引版本中等价于下式。这里省掉的是 MSHR 队列构造时传入的零值溢出空间。
+
+```cpp
+allocated < mshrs - (demand_mshr_reserve + 1)
+```
+
+源码保留了额外的 `+1`；这个细节决定阈值刚好相等时是否能取包。设缓存有 8 项 MSHR，需求预留参数为 2。占用必须**小于 5**才允许取一个预取包。假定缓存没有其他阻塞，已有事务均已发出，当前也没有更优先的待发读请求或写回。候选 P 通过地址和重复检查，下级能立即接收。
+
+| 周期 | 已分配的 MSHR | `0x1280` 所在位置 | 处理结果 |
+| --- | ---: | --- | --- |
+| 201 | 5 | 待发队列，已到可取时间 | `5 < 5` 不成立。缓存不取出 P，仍有三项给后续需求使用 |
+| 210，其他事务完成 | 4 | 仍在待发队列 | `4 < 5` 成立。释放旧项后，缓存可安排一次发送 |
+| 210，P 发出 | 5 | P 已分配自己的 MSHR | 占用重新升到 5。下一条预取还须等，但 P 已经在途 |
+| 260，需求读 P | 5 | P 的 MSHR 中已有读事务 | 若允许同块合并，需求只加一个等待者，无需再分配一项 |
+
+前两行的差别来自一次 MSHR 释放。候选在第 201 周期就已算好，预取算法没有重新训练。gem5 在释放 MSHR 后会重新判断是否有足够空间，再用当前周期边界和预取器的可取时间安排后续发送。例题假定重新仲裁和取包同在第 210 周期，实际发出时间还受端口和其他事务影响。
+
+::: details 练习｜多留一个位置给需求
+
+把 `demand_mshr_reserve` 改成 3。第 210 周期仍有一项完成，另有一项到第 230 周期才完成。其他条件不变，P 何时发出？第 260 周期的需求还要等多久？
+
+允许取包的条件变成 `allocated < 4`。第 210 周期降到 4，仍不能取包。第 230 周期降到 3，P 才能发出。按 90 周期的下级服务时间，第 320 周期返回，需求合并后等 60 周期。原配置等 40 周期，多出的 20 周期来自本地准入，地址预测和下级服务时长都没变。
+:::
+
 ### 把待发队列缩到两项
 
 仍用 `0x1280` 和 `0x1300`。此时两项候选都已进待发队列，但尚未被缓存接手。再假设另一条已学到步长的加载产生 `0x1380`，它通过了地址检查和去重，和前两项优先级相同。容量设为两项时，入队过程按本版规则移除最早的 `0x1280`，队列留下 `0x1300` 和 `0x1380`。如果此后需求访问 `0x1280`，不能用这个已经被移除的候选缩短等待。把同一题改为 `0x1280` 已经离开队列并进入 MSHR，待发队列再满也不会使该在途事务消失。两种容量压力作用在请求的不同阶段。
@@ -498,7 +524,8 @@ P 填入时移出 B，组中为 `[A, P]`。读 A 命中并改为 `[P, A]`，读 
 - [Chipyard 预取器文档](https://chipyard.readthedocs.io/en/stable/generators/prefetchers/)
 - [gem5 预取队列](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/prefetch/queued.cc)
 - [gem5 v24.1.0.3 跨页时从源虚拟地址构造翻译请求](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/prefetch/queued.cc#L373-L451)
-- [gem5 缓存下行仲裁](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/base.cc#L858-L947)
+- [gem5 缓存下行仲裁与取包后的重复检查](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/base.cc#L838-L876)
+- [gem5 MSHR 队列的预取准入条件](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/mshr_queue.hh#L142-L151) · [缓存队列初始化](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/base.cc#L75-L85) · [释放 MSHR 后重新安排发送](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/base.cc#L561-L576)
 - [观察条件和请求转换](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/prefetch/base.cc#L167-L273)
 - [步长与通知配置](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/prefetch/Prefetcher.py#L73-L220)
 - [gem5 训练与产出逻辑](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/prefetch/stride.cc#L108-L181)
