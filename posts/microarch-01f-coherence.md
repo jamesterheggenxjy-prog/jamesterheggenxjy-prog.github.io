@@ -109,6 +109,30 @@ MESI 的四个字母表示私有缓存行在事务收尾后的稳定状态。读
 
 gem5 Ruby 中，L1 将 S 状态的存储转入 `SM`，发送 `UPGRADE`。L2 在 `SS` 接到该请求后向其他潜在共享者发失效，同时把需要的确认信息告知请求者，过渡到 `SS_MB`。请求者凑齐所需确认后可以完成写，并用独占 `UNBLOCK` 让 L2 结束这一轮。这也解释了为什么只读四个稳定状态会漏掉一段等待。真实实现的确认可能经不同消息到达，计数记法也比上表更细。
 
+### 失效确认比目录回复先到怎么办 {#mesi-ack-arrival}
+
+上表把应收确认数视为已知。实际升级时，核 0 的 L1 发出 `UPGRADE`，负责行 A 的 L2 才根据 `Sharers` 确定有几份副本要撤销。L2 发给核 0 的回复携带这个数量。各共享者收到 `INV` 后，则直接向核 0 回送失效确认。消息来自不同控制器，先到的可以是目录回复，也可以是另一个 L1 的确认。
+
+在 gem5 Ruby 的这个协议中，核 0 的事务缓冲项 `pendingAcks` 初始为 0，每次从中减去消息的 `AckCount`。L2 把预期数量写成负数，其他 L1 的每条失效确认携带 `+1`。仍用两核主例。只有核 1 需要失效，所以 L2 的回复携带 `−1`。
+
+<div role="region" tabindex="0" aria-label="两种消息到达顺序下的确认计数" style="max-width:100%; overflow-x:auto">
+
+| 到达顺序 | 处理第一条消息后 | 第二条消息到来时的检查 |
+| --- | --- | --- |
+| L2 回复 → 核 1 的确认 | `0 − (−1) = 1`，还差一份确认 | `1 − 1 = 0`，进入 M，完成写入并发独占解除阻塞消息 |
+| 核 1 的确认 → L2 回复 | `0 − 1 = −1`，先记下已经收到的一份确认 | `−1 − (−1) = 0`，执行相同的状态转移 |
+
+</div>
+
+负值记录的是已经收到、但还没有与目录给出的预期数量抵消的确认。L1 在处理这类消息时检查相减的结果，落到 0 就触发 `Ack_all`。申请刚发出时的初值虽也是 0，仍处在等待升级的 `SM` 状态，尚未发生这个事件。L2 同时在 `SS_MB` 等核 0 的独占解除阻塞消息。如果核 1 的副本已经失效、重新发出的 `GETS` 此时抵达 L2，L2 会让它等待。等升级收尾，目录才能按新的所有者继续处理这笔读。
+
+::: details 练习｜再多一个共享者
+
+令核 1、核 2 都持有旧副本。核 1 的确认先到，随后到达 L2 回复，最后才收到核 2 的确认。逐步算出何时能完成写入。
+
+第一条把计数从 0 减到 `−1`。L2 回复携带 `−2`，相减得到 1，此时还差核 2。最后得到 `1 − 1 = 0`，这笔升级才完成。
+:::
+
 ### 下一级仍是 5，第二个核怎样读到 9 {#mesi-owner}
 
 核 1 已经没有有效副本，再读会发出 `GETS`，即申请可共享副本。L2 看到行 A 的独占持有者是核 0。在 Ruby `MESI_Two_Level` 的 `MT` 状态中，L2 不能把自己的数据直接当成最新值。它将请求转发给核 0，核 0 把 9 所在的完整数据送到请求者，并把最新数据交给 L2，自己的 L1 降为 S。
@@ -116,6 +140,28 @@ gem5 Ruby 中，L1 将 S 状态的存储转入 `SM`，发送 `UPGRADE`。L2 在 
 这次交接在 L2 所需的两个事件可以先后到达。收到所有者的数据，L2 才能把 5 换成 9。收到请求者的 `UNBLOCK`，它确认请求者已经拿到所需权限。Ruby 用 `MT_IIB` 表示两件事都在等，用 `MT_IB` 和 `MT_SB` 区分只剩哪一件。两件都到齐后回到 `SS`。片上 L2 更新成 9，主存什么时候也有 9，还要看 L2 的写回策略。
 
 目录中的共享者记录可以是“可能仍持有”的集合。Ruby 允许私有 L1 的某些干净行静默逐出，因此目录里出现一个核，通常表示需要按协议处理它，不能反过来断言它下一次本地访问一定命中。
+
+### 目录记着共享者，它却已经换出了这条行 {#mesi-stale-sharer}
+
+设一个四核目录的共享者位向量为 `0101`，核 0 与核 2 都曾读过 A。现在核 2 的私有缓存把 A 作为干净行换出，并按题设静默完成，没有立刻修改目录。目录仍记录 `0101`，实际持有 A 的只有核 0。
+
+接下来核 0 要写 A。目录按记录把请求者自身排除，向核 2 发送失效消息。核 2 查找后发现 A 已经不在本地，仍按本题协议回应确认。核 0 收到所需确认后，才完成写权限交接。多发送一次消息会增加开销，但目录没有漏掉可能持有副本的核。
+
+| 阶段 | 目录记录 | 核 0 的 A | 核 2 的 A |
+| --- | --- | --- | --- |
+| 两核读完 | `0101` | S | S |
+| 核 2 静默换出 | `0101` | S | I |
+| 核 2 回复失效确认 | 仍按本轮事务处理 | 等待升级完成 | I |
+| 升级完成 | 核 0 为独占持有者 | M | I |
+
+这个四核时序是教学模型，具体消息和目录字段以协议实现为准。要理解目录记录为何允许比实际持有者更宽，可以比较相反情况。若核 2 实际仍有可读副本，目录却漏记了它，核 0 就可能在没有撤销该副本的情况下获得写权。目录协议必须防止这种遗漏，并处理在途请求造成的状态变化。
+
+::: details 练习｜增加一个实际持有者
+
+把题设改成核 0、核 1、核 2 都实际持有 A，目录记为 `0111`。核 0 请求写权限时，目录需要向哪些核处理失效？
+
+排除请求者核 0 后，剩下 `0110`。核 1 和核 2 都是需要处理的对象。二者的确认到齐后，才可按本题规则完成升级。
+:::
 
 ### 写缺失与两个写请求的先后 {#mesi-write-miss}
 
@@ -347,7 +393,112 @@ W1=12  I/-  M/12  L2=9  ACK=[]
 
 缓存一致性主要回答“同一份数据的多个缓存副本怎样保持可解释”，并为同一地址上的写入确定一致的顺序。内存顺序则回答“程序对不同地址的读写，其他核心可以按什么顺序观察”。一个核心先写数据，再写就绪标志；另一个核心读到标志，并不只靠两条缓存行各自正确，就能推出它也一定读到新数据。还需要符合语言和 ISA 规定的同步关系。
 
-下面用 C11 的 release/acquire 原子操作建立这个关系。生产者先写 payload，再以 release 方式写 ready；消费者只有在 acquire 读到 ready 的新值以后，才读取 payload。release/acquire 建立跨地址的 happens-before 关系。缓存一致性仍负责这些地址的各自副本与写入顺序，但它本身不替代这项同步。
+### 两个地址都一致，为什么还会读到两个旧值 {#coherence-store-buffering}
+
+先用一个存储缓冲（store buffer）例子把两种规则分开。令 `x`、`y` 初始都为 0，分别放在不同缓存行，两个 hart 执行以下代码。`sw` 和 `lw` 都访问自然对齐的 32 位普通内存。
+
+```asm
+# 约定 s0 = &x，s1 = &y；x、y 初值均为 0。
+# Hart 0                         # Hart 1
+li   t0, 1                       li   t0, 1
+sw   t0, 0(s0)                   sw   t0, 0(s1)
+lw   t1, 0(s1)                   lw   t1, 0(s0)
+# 观察 t1：Hart 0 得到 r0，Hart 1 得到 r1。
+```
+
+一种可能的结果是 `r0 = 0`、`r1 = 0`。要沿每个 hart 自己的请求状态理解它：Hart 0 的存储先执行，地址、数据和有效状态进入本地的存储队列，但还没有对 Hart 1 可见；随后对 `y` 的加载与这笔 `x` 存储地址不同，不能从它转发，于是可以先从缓存层次读到旧值 0。Hart 1 同理，暂存对 `y` 的写入，同时从 `x` 读到 0。等两笔存储之后都取得一致性写权并传播，`x`、`y` 最终各自变成 1。
+
+这个结果没有让同一个地址出现相互矛盾的版本。对 `x` 而言，Hart 1 在新存储对它可见以前读到 0，之后新值 1 才传播；`y` 也一样。每个地址都可以有一致的写入次序。问题出在程序把 `x` 和 `y` 两个地址上的事件合起来解释：源码先写再读，两个 hart 却都在对方写入可见以前完成了读取。RVWMO 允许这种 store-buffering 结果，因为普通写后接不同地址的普通读，并不自动形成跨地址的全局先后关系。
+
+对照同地址的情况。若 Hart 0 改成先写 `x`、紧接着读 `x`，本 hart 的加载可以从仍在存储队列里的较新写入转发 1，不必等它先写入缓存；其他 hart 此时仍可能读到旧值。存储队列因此同时服务两种需求：尽早把已提交的写向一致性系统发送，以及让本 hart 后续的重叠加载取得正确的最新字节。转发说明本地加载拿到哪个值，并不表示这笔写已经对其他 hart 全局可见。BOOM 的队列字段和字节掩码见[加载怎样从存储队列拿到数据](./microarch-03d-load-store.md#lsu-entries)。
+
+### 加了栅栏以后，怎样证明某个结果不能出现 {#coherence-fence-order}
+
+把四条访存指令分别记作 `Wx`（Hart 0 写 `x`）、`Ry`（Hart 0 读 `y`）、`Wy`（Hart 1 写 `y`）、`Rx`（Hart 1 读 `x`）。推导时用 `A < B` 表示 A 在 RVWMO 的**全局内存顺序**中排在 B 前面。这个顺序用于检验观察到的结果。和流水线时钟相比，它回答的是另一件事：能否找到一个访存次序，同时满足指令的顺序约束和各条加载读到的值。
+
+初始写入都已完成，本题每个地址只有另一 hart 写入一次 1。因此，`Ry` 读到 0 要求 `Ry < Wy`，否则此前最近一次写 `y` 的就是 `Wy`，返回值应为 1。同理，`Rx` 读到 0 要求 `Rx < Wx`。两条读都只读对方写的地址，本地存储转发在这里没有候选。
+
+两个 hart 都在 `sw` 与 `lw` 之间加入 `fence rw, rw` 后，各自的存储必须排在自己的加载前。第一个 `rw` 选择栅栏前的普通内存读写，第二个 `rw` 选择栅栏后的普通内存读写。在本例里，所需的关系只有写在读之前，因此两处换成 `fence w, r` 也能排除同一结果。
+
+| 约束来自哪里 | 全局顺序必须满足 |
+| --- | --- |
+| Hart 0 的栅栏 | `Wx < Ry` |
+| `Ry` 读到初值 0 | `Ry < Wy` |
+| Hart 1 的栅栏 | `Wy < Rx` |
+| `Rx` 读到初值 0 | `Rx < Wx` |
+
+合起来得到 `Wx < Ry < Wy < Rx < Wx`。任何一条访存都不能排在自身前面，所以两个读数不可能同时为 0。这项保证也不要求脏行写回 DRAM。在缓存一致性系统里，新值可以由持有该行的缓存按协议提供。
+
+::: details 练习｜只给 Hart 0 加栅栏
+
+保留 `Wx < Ry`，去掉 `Wy < Rx`。试着给四个操作排个顺序，让两次读仍返回 0。
+
+一种可行顺序是 `Rx < Wx < Ry < Wy`。Hart 1 读 `x` 时，`Wx` 还未排到。Hart 0 读 `y` 时，`Wy` 也还未排到。两次都可读到初值，而 Hart 0 的顺序约束仍成立。
+
+:::
+
+### 用 C 枚举可能的全局顺序 {#coherence-fence-model}
+
+下面的程序逐一检查四个操作的 24 种排列。初值都是 0，每个写操作将对应变量置为 1。读操作记录执行到该位置时的值。分别改变两侧是否有栅栏，比较能得到的读数。程序实现的是上面四条指令的顺序推导，运行结果与宿主机器是否采用 RVWMO 无关。
+
+~~~c
+#include <stdbool.h>
+#include <stdio.h>
+
+enum operation { WX, RY, WY, RX, OP_COUNT };
+
+static void enumerate(unsigned used, int x, int y, int r0, int r1,
+                      bool fence0, bool fence1, unsigned counts[2][2])
+{
+    if (used == (1u << OP_COUNT) - 1u) {
+        ++counts[r0][r1];
+        return;
+    }
+
+    for (int op = 0; op < OP_COUNT; ++op) {
+        unsigned bit = 1u << op;
+        if (used & bit)
+            continue;
+        if (op == RY && fence0 && !(used & (1u << WX)))
+            continue;
+        if (op == RX && fence1 && !(used & (1u << WY)))
+            continue;
+
+        enumerate(used | bit, op == WX ? 1 : x, op == WY ? 1 : y,
+                  op == RY ? y : r0, op == RX ? x : r1,
+                  fence0, fence1, counts);
+    }
+}
+
+int main(void)
+{
+    puts("fence0 fence1 | (0,0) (0,1) (1,0) (1,1)");
+    for (int f0 = 0; f0 <= 1; ++f0) {
+        for (int f1 = 0; f1 <= 1; ++f1) {
+            unsigned counts[2][2] = {0};
+            enumerate(0, 0, 0, -1, -1, f0 != 0, f1 != 0, counts);
+            printf("%6d %6d | %5u %5u %5u %5u\n", f0, f1,
+                   counts[0][0], counts[0][1], counts[1][0], counts[1][1]);
+        }
+    }
+}
+~~~
+
+保存为 `fence_order.c`，用 `gcc -std=c11 -O2 -Wall -Wextra fence_order.c -o fence_order` 编译。运行后会得到以下表格。
+
+~~~text
+fence0 fence1 | (0,0) (0,1) (1,0) (1,1)
+     0      0 |     6     6     6     6
+     0      1 |     1     3     3     5
+     1      0 |     1     3     3     5
+     1      1 |     0     1     1     4
+~~~
+
+`used` 的每一位标记一种已经放入顺序的操作。有栅栏时，枚举只在相应写操作已经放入后才考虑读操作。以练习中的顺序为例，先选 `Rx`，得到 `r1 = 0`。随后选 `Wx`，便可以选 `Ry`，得到 `r0 = 0`。最后选 `Wy`，把这一排列计入 `counts[0][0]`。如果给 Hart 1 也加了栅栏，第一步就不能选 `Rx`。表里的数字是符合题设的排列数，不能用来估计实机上每种结果的频率。
+
+### 生产者写完数据以后怎样发布 {#coherence-release-acquire}
+
+换回生产者和消费者的例子。C11 提供 release/acquire 原子操作，让消费者读到发布标志时，也能取得此前写入的数据。生产者先写 `payload`，再以 release 方式写 `ready`。消费者只有在 acquire 加载读到这次发布的 `ready = 1` 后才读取 `payload`。
 
 ~~~c
 #include <assert.h>
@@ -392,7 +543,14 @@ int main(void)
 }
 ~~~
 
-保存为 `release_acquire.c`，可用 `gcc -std=c11 -O2 -Wall -Wextra -pthread release_acquire.c -o release_acquire` 编译。把 `ready` 的 store 和 load 都改成 `memory_order_relaxed` 后，程序仍然使用原子变量，也没有数据竞争；但读到 `ready=1` 与读到 `payload=42` 之间不再有 release/acquire 同步保证。处理器可能实现每个地址自身的一致性，而编译器与 ISA 仍允许跨地址的可见顺序不符合程序原本想表达的“先数据、后标志”。
+保存为 `release_acquire.c`，可用 `gcc -std=c11 -O2 -Wall -Wextra -pthread release_acquire.c -o release_acquire` 编译。程序退出等待后应输出 `payload=42`。这个结论可以沿四个操作逐项推导。
+
+1. 写 `payload = 42` 在同一线程内先于发布 `ready = 1`。
+2. 消费者退出循环的那次加载读取了 release 写入的 1。该 release 与读到它的 acquire 建立同步关系。循环中读到 0 的那些加载没有建立这条关系。
+3. 消费者在退出循环后才读取 `payload`。把两段线程内的先后和中间的同步关系接起来，得到写 `payload = 42` **先行发生**（happens-before）于消费者读 `payload`。
+4. 按 C11 对同一原子对象的写读一致性要求，消费者必须读到该次写入或修改顺序中更晚的写入。题设没有后续写入，因此只能读到 42。两处 `payload` 操作用 relaxed 已经足够，连接它们的顺序来自 `ready`。
+
+若把 `ready` 的两处操作也改成 relaxed，变量仍然是原子的，但上面的第 2 步失去同步关系。C11 此时允许读到 `ready = 1` 后仍读到 `payload = 0`。即使真机反复输出 42，也只能说明本次编译和运行没有观察到另一种结果。
 
 因此，分析多核执行时要先问是哪一种问题：一条缓存行的旧副本何时失效，是一致性问题；先写 payload、再发布 ready 的顺序如何约束，是内存模型和同步问题。把两者混称为“缓存同步”，会让人误以为一个核心观察到某条行的新值，就必然观察到此前所有其他行上的新值。
 
@@ -412,6 +570,7 @@ Prime+Probe 观察的是另一种现象。观察者先占用一组缓存位置�
 - [C11 草案 N1570：原子操作与内存顺序](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf)
 - [gem5 Ruby MESI Two Level 的结构、权限和过渡状态](https://www.gem5.org/documentation/general_docs/ruby/MESI_Two_Level/)
 - 图 1 来自 gem5 Bootcamp 2024 的《Modeling Cache Coherence in gem5》，本站加了白底、边距及控制器与互连之间的连线。[原图](https://github.com/gem5bootcamp/2024/blob/3ea9b7e3598cd15e8c0ea688fa850249eab0fad5/slides/03-Developing-gem5-models/06-modeling-cache-coherence-imgs/ruby-inside.drawio.svg) · [CC BY 4.0 许可](https://creativecommons.org/licenses/by/4.0/)
+- [RISC-V RVWMO 解释材料：存储缓冲转发与允许的 litmus 结果](https://docs.riscv.org/reference/isa/v20260120/unpriv/mm-eplan.html)
 - [gem5 v24.1.0.3 的 L1 状态和事务表](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/ruby/protocol/MESI_Two_Level-L1cache.sm)
 - [gem5 v24.1.0.3 的 L2 目录字段和过渡状态](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/ruby/protocol/MESI_Two_Level-L2cache.sm)
 - [RISC-V 的 RVWMO 内存顺序模型](https://docs.riscv.org/reference/isa/unpriv/rvwmo.html)
