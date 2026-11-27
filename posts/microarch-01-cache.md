@@ -39,6 +39,23 @@ book: microarch-00-intro
 
 **时间局部性**说的是刚用过的数据有机会很快再用，例如循环反复读取同一个计数值。**空间局部性**说的是访问某个地址后，附近的不同地址也有机会被用到，例如顺序读数组。缓存按块保存数据，所以连续访问 `0x1020` 和 `0x1024`，会表现为在缓存行层面重复使用同一块。若两次之间该块仍有效，第二次可以直接用已有副本。
 
+### 一次加载跨过缓存行边界时 {#locality-cross-line}
+
+缓存按行保存数据，加载指令却按程序要求取一个数值。两者的边界不一定重合。仍用 64 字节行，假设处理器执行一次被平台支持的 4 字节未对齐读取，起始地址为 `0x103e`。它要的四个字节分别位于 `0x103e`、`0x103f`、`0x1040` 和 `0x1041`：前两个在行 `0x1000`，后两个在行 `0x1040`。
+
+| 地址范围 | 本次加载需要的字节 | 所属缓存行 |
+| --- | --- | --- |
+| `0x103e`–`0x103f` | 第 0、1 字节 | `0x1000`–`0x103f` |
+| `0x1040`–`0x1041` | 第 2、3 字节 | `0x1040`–`0x107f` |
+
+在本节的整行填充模型中，若两行都不在缓存里，这一次加载会引起两次行请求；若第一行命中、第二行未命中，则只需为第二行发起下级请求。处理器可以在内部拆分、跟踪并合并这些部分，具体做法依实现而异。无论内部怎样安排，程序所需的四个字节都要齐备后，才能得到完整的加载结果。若数据按小端序解释，最低地址处的字节构成结果的低 8 位。
+
+以一个教学实现为例，设两行均未命中，而且两块都没有在途请求。加载单元把操作拆成两部分，分别交给缓存。缓存为 `0x1000` 和 `0x1040` 的取行事务各分配一个 MSHR，同时记下每个事务要交给哪个等待者。假设第一行在第 30 周期返回，第二行在第 42 周期返回。加载单元先保存第 30 周期得到的两个字节，等第 42 周期另外两个字节到齐，再按字节位置拼接结果。第二行的返回时刻决定了本次加载最早能完成的时刻。
+
+若两行都在缓存中，拆出的两个部分仍分别检查对应行，但本题不需要为它们新建取行事务。若某一块已有在途取行，且缓存允许合并，匹配的部分可以加入已有事务的等待者，不必再发一笔同块请求。这些安排是说明性的模型。具体处理器如何拆分访问、保存部分结果和分配资源，要查对应实现。[MSHR 一课](./microarch-01a-mshr.md#mshr-trace)继续用同一块内的多笔加载说明事务与等待者的关系。
+
+本文讨论被平台支持的未对齐访问。有的平台会限制某些访问，或对不支持的未对齐访问报告异常。跨过页边界时，两侧的地址翻译与权限也需分别成立。
+
 ## 访问相同的数据，为什么取行次数不同 {#locality-order}
 
 下面把相同的八次访问按两种顺序排列。设缓存开始为空，只能保存任意两条 64 字节的行。空间用满时，换掉最久没访问的行。这里关闭预取，只数需求引起的填充。A、B、C、D 四条行的起点分别为 `0x2000`、`0x2040`、`0x2080`、`0x20c0`。
@@ -79,44 +96,73 @@ book: microarch-00-intro
 
 这里采用全相联缓存，任意块都能放到任意可用行，替换策略为精确 LRU，也就是满时换掉最久未用的一行。把已经出现的块按从近到远排列，容量为 $C$ 行的缓存始终保存最前面的 $C$ 条，或在不足 $C$ 条时保存全部。一次复用的距离为 $d$，表示目标前面排着 $d$ 个不同的块。它只在 $d<C$ 时命中。因此四次首次访问一定未命中，距离等于或超过容量的复用也会未命中。用同一张表能算出容量为 1、2、3、4 行时未命中分别为 7、6、5、4 次。
 
-下面的 Python 3 程序复算这张表。`recent` 记录所有已经出现的块，列表位置从最近使用的 0 开始。每次先读目标的旧位置，再把它移到最前面。`covered_blocks` 也可以计算后面整个数组覆盖的块号。
+下面的 C11 程序按地址表的顺序处理八次加载。数组 `recent` 是从最近到最久排列的访问历史。它能容纳本题出现过的所有块，因此即使某块在容量为两行的缓存里早已被换出，程序仍能算出它的复用距离。得到距离后，再用不同容量计算未命中次数。
 
-```python
-def covered_blocks(start, byte_count, line_size):
-    assert start >= 0 and byte_count > 0 and line_size > 0
-    first = start // line_size
-    last = (start + byte_count - 1) // line_size
-    return range(first, last + 1)
+将代码保存为 `cache_locality.c`，执行 `gcc -std=c11 -O2 -Wall -Wextra cache_locality.c -o cache_locality` 后运行。
 
+```c
+#include <stddef.h>
+#include <stdio.h>
 
-def reuse_distances(blocks):
-    recent = []
-    for block in blocks:
-        if block in recent:
-            distance = recent.index(block)
-            recent.pop(distance)
-        else:
-            distance = None
-        recent.insert(0, block)
-        yield distance
+static unsigned covered_lines(unsigned start, unsigned bytes,
+                              unsigned line_bytes)
+{
+    /* 本题的字节区间非空，且末地址可用 unsigned 表示。 */
+    unsigned first = start / line_bytes;
+    unsigned last = (start + (bytes - 1)) / line_bytes;
+    return last - first + 1;
+}
 
+int main(void)
+{
+    const unsigned addresses[] = {
+        0x2000, 0x2040, 0x2044, 0x2004,
+        0x2080, 0x20c0, 0x2008, 0x2048,
+    };
+    enum { ACCESS_COUNT = sizeof addresses / sizeof addresses[0] };
+    unsigned recent[ACCESS_COUNT];
+    unsigned misses[4] = {0};
+    size_t distinct = 0;
 
-def miss_count(distances, capacity):
-    return sum(distance is None or distance >= capacity for distance in distances)
+    printf("distance:");
+    for (size_t i = 0; i < ACCESS_COUNT; ++i) {
+        unsigned block = addresses[i] / 64;
+        size_t rank = 0;
+        while (rank < distinct && recent[rank] != block)
+            ++rank;
+        int first_access = rank == distinct;
 
+        if (first_access) {
+            printf(" first");
+            ++distinct;
+        } else {
+            printf(" %zu", rank);
+        }
+        for (unsigned capacity = 1; capacity <= 4; ++capacity) {
+            if (first_access || rank >= capacity)
+                ++misses[capacity - 1];
+        }
 
-addresses = (0x2000, 0x2040, 0x2044, 0x2004,
-             0x2080, 0x20C0, 0x2008, 0x2048)
-blocks = [addr // 64 for addr in addresses]  # 题中各次加载都在一块内
-distances = list(reuse_distances(blocks))
-counts = [miss_count(distances, capacity) for capacity in range(1, 5)]
-assert distances == [None, None, 0, 1, None, None, 2, 3]
-assert counts == [7, 6, 5, 4]
-assert len(covered_blocks(0x1020, 160, 64)) == 3
-assert len(covered_blocks(0x1030, 160, 64)) == 4
-print("distance:", distances)
-print("misses with 1 to 4 lines:", counts)
+        for (size_t j = rank; j > 0; --j)
+            recent[j] = recent[j - 1];
+        recent[0] = block;
+    }
+
+    printf("\nmisses with 1 to 4 lines: %u %u %u %u\n",
+           misses[0], misses[1], misses[2], misses[3]);
+    printf("lines for a 160-byte array: %u %u\n",
+           covered_lines(0x1020, 160, 64), covered_lines(0x1030, 160, 64));
+    return 0;
+}
 ```
+
+```text
+distance: first first 0 1 first first 2 3
+misses with 1 to 4 lines: 7 6 5 4
+lines for a 160-byte array: 3 4
+```
+
+以第 7 次访问为例，查找前的前四项是 D、C、A、B，所以 A 的位置 `rank` 为 2。搬动的只有比 A 更近的 D、C，更新后顺序为 A、D、C、B。B 的位置没有变化。也就是说，代码用同一次搬动同时维护了 A 的新近程度，以及第 8 次访问 B 时需要数的三个不同块。最后一行输出对应下节的线性扫描例题。
 
 这条判据对应全相联、精确 LRU 的题设。遇到组相联缓存，只有竞争同一组的块才会占用这一组的路。若采用其他替换策略或启用预取，实际驻留还会受这些规则改变。[下一节的组内替换例题](./microarch-01b-cache-mapping.md#cache-replacement)会先找出三个地址为什么落入同一组，再判断哪一行被换出。
 
@@ -142,6 +188,25 @@ $$
 取首地址 `0x1020` 的原数组，依次读下标 0、4、8，直到 36。若缓存初始为空，且读取期间无替换和预取，需要填几条行？程序实际读取了多少字节？
 
 这十次读取的起始地址每次增加 16 字节，从 `0x1020` 到 `0x10b0`。它们仍落在 `0x1000`、`0x1040`、`0x1080` 三块里。仍要填三行，共 192 字节，而程序使用了其中 40 字节。要减少填充次数，需要把要读的元素集中到更少的块里。
+:::
+
+### 同一个数组扫描两遍，为什么第二遍还要取行 {#locality-second-pass}
+
+仍用首地址 `0x1020` 的 40 元素数组。将覆盖的三行分别记为 A（`0x1000`）、B（`0x1040`）、C（`0x1080`）。A 包含数组的前 8 个元素，B 和 C 各包含 16 个。设所分析的缓存可以保留任意两行，按精确 LRU 替换。关闭预取，没有其他访问。第一遍从低地址向高地址读取，因此依次填入 A、B、C，结束时只剩 B 和 C，C 最近使用。
+
+| 第二遍的顺序 | 到达各行时发生什么 | 第二遍的需求填充 |
+| --- | --- | ---: |
+| 从低地址开始，A → B → C | A 缺失，换出 B。B 缺失，换出 C。C 也需重新取回 | 3 次，共 192 字节 |
+| 从高地址开始，C → B → A | C、B 依次命中。读 A 时才换出 C | 1 次，共 64 字节 |
+
+这里把一段连续的行内读取记成一次行访问。第一遍的三次填充都要计入总量，所以两种安排分别传入 384 和 256 字节。数组本身始终覆盖三行，每遍也始终读取 160 字节。要预测实际填充数，需要再知道扫描开始时哪些行仍在，以及访问次序会怎样改变替换结果。这个判断和[矩阵按行分批](./microarch-01d-cache-traversal.md#matrix-row-tiles)用的是同一个原则：在旧数据再次要用之前，先算它是否还留在可用的缓存位置里。
+
+::: details 练习｜第二遍开始前加一笔读取
+
+仍令第二遍从高到低，但在两遍之间额外读取一条无关的行 D。进入第二遍时缓存里是哪两行？这次扫描本身需要几次填充？
+
+读 D 时换出较早使用的 B，留下 C 和 D。第二遍先读 C，命中并更新最近使用顺序。随后读 B，换出 D。最后读 A，换出 C。第二遍本身需要两次填充。若统计从第一遍结束到第二遍结束的全部流量，还要额外算上 D 的一次填充。
+
 :::
 
 ## 参考文献
