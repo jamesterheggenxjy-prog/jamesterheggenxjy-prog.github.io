@@ -75,6 +75,25 @@ sw t1, 36(a0)
 
 第五步后，A 已离开数据阵列，下一级仍存旧数据。新值 9、12 和没改过的 17 都在等待发送的副本中。写回的起始地址由被替换行的标记与第 0 组反求，得到块起点 `0x1000`。`0x1020` 只标识第一次存储覆盖的字，写回要覆盖整行。
 
+### 被替换的行怎样重新组成写回地址 {#writeback-address}
+
+本题有 64 字节行和 64 组。地址低 6 位是行内偏移，再向上的 6 位是组号，其余高位是标记。填入 C 时，缓存选中的是第 0 组里保存 A 的路。该路的标记为 `0x1`，组号为 `0x00`。重建旧行的起始地址，要把这两个字段放回原位，行内偏移填零。
+
+| 字段 | 数值 | 放回地址中的结果 |
+| --- | --- | --- |
+| A 的标记 | `0x1` | `0x1 << 12 = 0x1000` |
+| 组号 | `0x00` | `0x00 << 6 = 0x0000` |
+| 行内偏移 | `0x00` | 写回从行首开始 |
+
+三部分按位或得到 `0x1000`。写回包携带这一地址和从 A 复制出的 64 字节，包含偏移 `0x20`、`0x24` 处的新值。新填入的 C 有相同组号，但标记是 `0x3`。若误用 C 的标记重建写回地址，就会把 A 的数据送到 `0x3000`。因此回收原路之前，缓存必须用旧行的标记、组号和数据构造或保存写回记录。
+
+::: details 练习｜换出同组的 B
+
+若被换出的是块 B，起点为 `0x2000`，组号仍为 0，它的标记和重建后的写回地址分别是多少？
+
+标记是 `0x2`，按 `(标记 << 12) | (组号 << 6)` 得到 `0x2000`。还要看 B 是否带有需要移交的数据，才能决定是否需要脏行写回。
+:::
+
 只计数据，三次填充共向上 192 字节，A 的写回向下 64 字节，未包含地址、许可和协议控制。若换成写直达并保留写分配，仍有三次填充。假设下一级支持四字节更新且写缓冲不合并，两次存储共向下送 8 字节。若写直达又取消写分配，B 和 C 才触发本级行填充，向上共 128 字节。同一行写很多次时，写回可以把反复改写的字节合到一次整行传输。实际比较要同时给出传输粒度和统计截止位置。
 
 ## 脏行移出数据阵列以后存在哪里 {#write-back-buffer}
@@ -94,124 +113,235 @@ gem5 的 `BaseCache::writebackBlk` 从缓存块重建地址，构造 `WritebackD
 
 **如果写缓冲已满。** 即使 [MSHR](./microarch-01a-mshr.md#mshr-entry) 还有位置跟踪 C 的未完成请求，另外被选中的脏行也必须有地方保存数据，才能安全回收原路。实现可为在途填充预留写回位置，或延后接受新的请求，等写缓冲腾出空间。对照[缺失表项的容量限制](./microarch-01a-mshr.md#mshr-limits)，可以定位这次等待是发生在取行一侧，还是移交脏行的一侧。
 
+### 写回被拒绝后，同一行的读取要等到哪一步 {#write-back-retry}
+
+沿用脏行 A。它从 `0x1000` 开始，偏移 `0x20`、`0x24` 和 `0x28` 处的值是 9、12、17。下一级在偏移 `0x24` 处仍保存旧值 11。A 离开本级数据阵列后，线程立即加载 `0x1024`。此地址虽然不等于写回包的起点，但向下对齐到 64 字节后，两个请求都对应块 `0x1000`。例题只讨论普通缓存内存，无其他核心同时访问 A。假定下一级在接收写回后按同块顺序处理后到的取行请求。
+
+| 周期 | 发生的事 | 本级仍在跟踪什么 |
+| ---: | --- | --- |
+| 10 | C 填入，被换出的 A 进入写缓冲 | 写缓冲保留 A 的整行新数据 |
+| 11 | 对 `0x1024` 的加载未命中 | MSHR 记录块 `0x1000` 和等待读取的字节 |
+| 12 | 端口仲裁发现同块待发写回，先尝试发送 A；下一级拒绝 | 写回包仍留在本级，加载还不能取下一级的旧副本 |
+| 16 | 下一级通知可以重试，并接收再次发送的写回 | 本级移交 A 的数据，下一级负责后续同块访问的正确顺序 |
+| 17 | 本级发出缺失读 | MSHR 继续保留加载，直到整行返回 |
+| 23 | 整行返回 | 加载取到偏移 `0x24` 处的新值 12 |
+
+第 12 周期已经选中了写回，但端口拒绝意味着数据还没有交给下一级。第 16 周期交接成功，也只表示相邻两级完成了责任转移。即使写回还未到主存，第 17 周期的读取也可以由持有最新数据的下一级处理。gem5 的仲裁在准备选择缺失项时查找冲突的写回。表中的周期、独立端口尝试与下一级处理时刻均为题设。
+
+::: details 练习｜只改变读取的行内偏移
+
+把读取改成 `0x1028`。它还能在第 12 周期绕过 A 的写回吗？最终读到什么？
+
+两个请求还是匹配块 `0x1000`，因此仍需等待同块写回交接。回包后选取偏移 `0x28` 处的字节，读到 17。即使这些字节这次没有被改过，调度检查仍以同一个块为单位。
+
+:::
+
+### 写缓冲报满时，已经在途的填充怎么办 {#write-back-reserve}
+
+gem5 v24.1.0.3 的经典缓存有两个不同的容量数字。`write_buffers` 是写队列对上游施加阻塞的阈值，实际队列还多分配了 `mshrs` 个备用项。原因是缓存接受缺失并分配 MSHR 时，尚未为这次缺失逐笔占用一个写项。将来数据回来，缓存可能要先把一条脏行移出，才能使用它原先占的路。
+
+沿用 C 填充时换出脏行 A 的例子。设 `write_buffers = 2`，`mshrs = 2`，因此一共有四个可分配的队列项，普通阻塞阈值仍是两项。题设中，C 的下行请求已经发出，随后两条与 A 无关的写回 X、Y 占到了阈值。此后下级端口暂时忙，X 和 Y 都还在本级队列中。
+
+<div role="region" tabindex="0" aria-label="写回阈值与备用项的使用" style="max-width:100%; overflow-x:auto">
+
+| 事件 | 写队列占用 | 写队列的满状态 | C 与 A 怎样处理 |
+| --- | ---: | --- | --- |
+| X、Y 都在等待发送 | 2／4 | 满，新上游请求受阻 | C 的填充仍在途 |
+| C 回包，需要换出 A | 3／4 | 仍满 | C 填入原来的路，A 的整行写回包进入备用空间 |
+| 下级接受一条旧写回 | 2／4 | 仍满 | 释放了一项，尚未降到阈值以下 |
+| 下级再接受一条写回 | 1／4 | 写队列的阻塞解除 | 若无其他阻塞原因，上游可收到重试通知 |
+
+</div>
+
+表中的“满”是上游流量控制的判断。第 2 行依然可以分配备用项，缓存把 A 的最新数据保存在包里，等待下级接收。这个设计给已经接收的请求留下完成所需的空间。备用项属于整个写队列，某笔 MSHR 并没有预先绑定某个写回槽。期间 X、Y、A 的实际发送先后还要看队列就绪时间和同块冲突。
+
+::: details 练习｜如果 A 是干净行
+
+假设这次换出干净行 A 时，按配置无需向下级发送任何包。C 回来以后还会占用备用项吗？下级至少要接受几条旧写回，写队列才解除阻塞？
+
+C 填入时没有新包进写队列，占用仍为 2。下一条旧写回被下级接收后，占用降到 1，写队列就解除自己的阻塞。
+:::
+
 ## 用同一组地址核对三种写策略 {#store-model}
 
-下面的单核 Python 模型只模拟第 0 组的两路。`ways` 按最久使用到最近使用排列，`writeback` 留一个写回槽。程序把下级接受写回和更新其数据合为一步，并假设直达更新立即到下一级。把代码保存为 `cache_write.py` 后运行 `python cache_write.py`。
+下面的 C11 模型保存第 0 组的两路，以及一个可移交整行的写回槽。`way[0]` 是最近使用的一路，`way[1]` 是较久未用的一路。为便于复算，模型把直达写入和已接受的写回立即记入下一级。这里只计算传输的数据字节，不计命令和地址。
 
-```python
-from dataclasses import dataclass
+保存为 `cache_write.c`，用 `gcc -std=c11 -O2 -Wall -Wextra cache_write.c -o cache_write` 编译并运行。
 
-LINE_BYTES = 64
-A, B, C = 0x1000, 0x2000, 0x3000
+```c
+#include <assert.h>
+#include <stdbool.h>
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
+enum { LINE = 64 };
+enum { A, B, C, BLOCKS };
+enum Policy { WRITE_BACK, WRITE_THROUGH, BYPASS_ON_MISS };
+enum Result { READY, WAIT_SAME_BLOCK, WAIT_BUFFER_SPACE };
 
-def word_from(data, offset):
-    return int.from_bytes(data[offset:offset + 4], "little")
+struct Line {
+    bool valid;
+    bool dirty;
+    unsigned block;
+    uint8_t bytes[LINE];
+};
 
+struct Cache {
+    struct Line way[2];
+    struct Line writeback;
+    uint8_t lower[BLOCKS][LINE];
+    unsigned up_bytes;
+    unsigned down_bytes;
+    enum Policy policy;
+};
 
-@dataclass
-class Line:
-    data: bytearray
-    dirty: bool = False
+static uint32_t word(const uint8_t bytes[], unsigned offset)
+{
+    uint32_t result = 0;
+    for (unsigned i = 0; i < 4; ++i)
+        result |= (uint32_t)bytes[offset + i] << (8 * i);
+    return result;
+}
 
+static void put_word(uint8_t bytes[], unsigned offset, uint32_t value)
+{
+    for (unsigned i = 0; i < 4; ++i)
+        bytes[offset + i] = (uint8_t)(value >> (8 * i));
+}
 
-class Cache:
-    def __init__(self, write_allocate=True, write_through=False):
-        self.write_allocate = write_allocate
-        self.write_through = write_through
-        self.lower = {base: bytearray(LINE_BYTES) for base in (A, B, C)}
-        for offset, value in ((0x20, 5), (0x24, 11), (0x28, 17)):
-            self.lower[A][offset:offset + 4] = value.to_bytes(4, "little")
-        self.ways = {}
-        self.writeback = None
-        self.up_bytes = 0
-        self.down_bytes = 0
+static int find(const struct Cache *cache, unsigned block)
+{
+    for (int i = 0; i < 2; ++i)
+        if (cache->way[i].valid && cache->way[i].block == block)
+            return i;
+    return -1;
+}
 
-    def get_line(self, base):
-        if base in self.ways:
-            line = self.ways.pop(base)
-        else:
-            if self.writeback is not None and self.writeback[0] == base:
-                raise BlockingIOError("同块写回尚未发送")
-            if len(self.ways) == 2:
-                old_base = next(iter(self.ways))
-                old = self.ways[old_base]
-                if old.dirty:
-                    if self.writeback is not None:
-                        raise BlockingIOError("写回缓冲已满")
-                    self.writeback = (old_base, bytes(old.data))
-                del self.ways[old_base]
-            line = Line(bytearray(self.lower[base]))
-            self.up_bytes += LINE_BYTES
-        self.ways[base] = line
-        return line
+static enum Result get_line(struct Cache *cache, unsigned block)
+{
+    int hit = find(cache, block);
+    if (hit == 0)
+        return READY;
+    if (hit == 1) {
+        struct Line recent = cache->way[0];
+        cache->way[0] = cache->way[1];
+        cache->way[1] = recent;
+        return READY;
+    }
+    if (cache->writeback.valid && cache->writeback.block == block)
+        return WAIT_SAME_BLOCK;
 
-    def load_word(self, address):
-        offset = address % LINE_BYTES
-        return word_from(self.get_line(address - offset).data, offset)
+    struct Line *victim = &cache->way[1];
+    if (victim->valid && victim->dirty) {
+        if (cache->writeback.valid)
+            return WAIT_BUFFER_SPACE;
+        cache->writeback = *victim;
+    }
 
-    def store_word(self, address, value):
-        offset = address % LINE_BYTES
-        base = address - offset
-        payload = value.to_bytes(4, "little")
-        if self.write_allocate or base in self.ways:
-            line = self.get_line(base)
-            line.data[offset:offset + 4] = payload
-            line.dirty = not self.write_through
-            if not self.write_through:
-                return
-        self.lower[base][offset:offset + 4] = payload
-        self.down_bytes += len(payload)
+    cache->way[1] = cache->way[0];
+    cache->way[0] = (struct Line){ .valid = true, .block = block };
+    memcpy(cache->way[0].bytes, cache->lower[block], LINE);
+    cache->up_bytes += LINE;
+    return READY;
+}
 
-    def send_writeback(self):
-        if self.writeback is not None:
-            base, data = self.writeback
-            self.lower[base][:] = data
-            self.down_bytes += len(data)
-            self.writeback = None
+static enum Result store_word(struct Cache *cache, unsigned block,
+                              unsigned offset, uint32_t value)
+{
+    if (cache->policy != BYPASS_ON_MISS || find(cache, block) >= 0) {
+        enum Result result = get_line(cache, block);
+        if (result != READY)
+            return result;
+        put_word(cache->way[0].bytes, offset, value);
+        if (cache->policy == WRITE_BACK) {
+            cache->way[0].dirty = true;
+            return READY;
+        }
+    }
+    put_word(cache->lower[block], offset, value);
+    cache->down_bytes += 4;
+    return READY;
+}
 
+static void send_writeback(struct Cache *cache)
+{
+    assert(cache->writeback.valid);
+    memcpy(cache->lower[cache->writeback.block],
+           cache->writeback.bytes, LINE);
+    cache->down_bytes += LINE;
+    cache->writeback.valid = false;
+}
 
-def run(cache, touch_b=True):
-    cache.load_word(B)
-    cache.store_word(A + 0x20, 9)
-    cache.store_word(A + 0x24, 12)
-    if touch_b:
-        cache.load_word(B)
-    cache.load_word(C)
-    return cache
+static void require(enum Result actual, enum Result expected)
+{
+    assert(actual == expected);
+    (void)actual;
+    (void)expected;
+}
 
+static struct Cache run(enum Policy policy, bool touch_b)
+{
+    struct Cache cache = { .policy = policy };
+    put_word(cache.lower[A], 0x20, 5);
+    put_word(cache.lower[A], 0x24, 11);
+    put_word(cache.lower[A], 0x28, 17);
 
-def first_two_words(data):
-    return tuple(word_from(data, offset) for offset in (0x20, 0x24))
+    require(get_line(&cache, B), READY);
+    require(store_word(&cache, A, 0x20, 9), READY);
+    require(store_word(&cache, A, 0x24, 12), READY);
+    if (touch_b)
+        require(get_line(&cache, B), READY);
+    require(get_line(&cache, C), READY);
+    return cache;
+}
 
+static void print_pair(const char *label, const uint8_t bytes[])
+{
+    printf("%s (%" PRIu32 ", %" PRIu32 ")\n",
+           label, word(bytes, 0x20), word(bytes, 0x24));
+}
 
-if __name__ == "__main__":
-    wb = run(Cache())
-    print("A 入队后，下一级", first_two_words(wb.lower[A]))
-    print("A 入队后，缓冲内", first_two_words(wb.writeback[1]))
-    wb.send_writeback()
-    print("写回后，下一级", first_two_words(wb.lower[A]))
+int main(void)
+{
+    struct Cache wb = run(WRITE_BACK, true);
+    struct Cache wt = run(WRITE_THROUGH, true);
+    struct Cache bypass = run(BYPASS_ON_MISS, true);
+    struct Cache skip_b = run(WRITE_BACK, false);
 
-    wt = run(Cache(write_through=True))
-    bypass = run(Cache(write_allocate=False, write_through=True))
-    print("写分配、写回", wb.up_bytes, wb.down_bytes)
-    print("写分配、写直达", wt.up_bytes, wt.down_bytes)
-    print("不写分配、写直达", bypass.up_bytes, bypass.down_bytes)
+    print_pair("lower before send", wb.lower[A]);
+    print_pair("writeback slot", wb.writeback.bytes);
+    require(get_line(&wb, A), WAIT_SAME_BLOCK);
+    send_writeback(&wb);
+    print_pair("lower after send", wb.lower[A]);
+
+    printf("write allocate, write back: %u %u\n", wb.up_bytes, wb.down_bytes);
+    printf("write allocate, write through: %u %u\n", wt.up_bytes, wt.down_bytes);
+    printf("no write allocate, write through: %u %u\n",
+           bypass.up_bytes, bypass.down_bytes);
+    printf("skip second B, bytes down: %u\n", skip_b.down_bytes);
+
+    require(get_line(&wb, A), READY);
+    assert(word(wb.way[0].bytes, 0x20) == 9);
+    return 0;
+}
 ```
 
 ```text
-A 入队后，下一级 (5, 11)
-A 入队后，缓冲内 (9, 12)
-写回后，下一级 (9, 12)
-写分配、写回 192 64
-写分配、写直达 192 8
-不写分配、写直达 128 8
+lower before send (5, 11)
+writeback slot (9, 12)
+lower after send (9, 12)
+write allocate, write back: 192 64
+write allocate, write through: 192 8
+no write allocate, write through: 128 8
+skip second B, bytes down: 0
 ```
 
-`store_word` 的切片只覆盖 `offset` 起的四个字节。`get_line` 回收脏行时，用 `bytes(old.data)` 把数据复制到写回记录，才移除旧行。可以在 `send_writeback` 之前尝试 `wb.load_word(A + 0x20)`，模型会报告同块写回在等待。发送后重试，加载从下一级取到 9。输出中的流量在这笔重试之前统计。
+程序用 A、B、C 的数组下标表示正文中的三块对齐地址，`0x20` 与 `0x24` 仍是实际行内偏移。填入 C 时，`get_line` 先按结构体复制旧脏行，再用 C 的数据占用缓存位置。因此 A 的缓存位置已经丢失，写回槽中仍有旧地址和完整的 64 字节。写回被接收前，读 A 返回 `WAIT_SAME_BLOCK`，也没有增加传输计数。写回被接收后，程序先输出原例的流量，再重试读取 A，确认读到 9。最后这笔重试产生的额外取行没有计入表中的 192 字节。
 
 ::: details 练习｜少读一次 B，写回次数会变吗
-在程序末尾补一句 `print(run(Cache(), touch_b=False).down_bytes)`，只去掉第二次读 B。C 会替换谁？到 C 填充结束为止，向下送了多少字节？
+看程序里的 `run(WRITE_BACK, false)`。它只去掉第二次读 B。C 会替换谁？到 C 填充结束为止，向下送了多少字节？
 
 第二次存储后，A 是最近用过的行。C 替换更久未用的 B。B 干净，写回槽为空，观察窗口内的下行数据为零。A 仍然脏，其两个字在本级是 9、12，下一级仍是 5、11。只有统计期覆盖 A 将来的移交，才要计入那次写回。
 :::
@@ -220,6 +350,8 @@ A 入队后，缓冲内 (9, 12)
 
 ## 参考文献
 
+- [gem5 v24.1.0.3 写队列的备用项配置](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/base.cc#L75-L117)
+- [gem5 v24.1.0.3 队列的实际容量与满状态判断](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/queue.hh#L122-L141)
 - [RISC-V 非特权规范中的加载与存储指令](https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#load-and-store-instructions)
 - [MIT 6.004 缓存与写入策略讲义](https://ocw.mit.edu/courses/6-004-computation-structures-spring-2017/pages/c14/c14s1/)
 - 图 1 来自 Djordje Kovacevi 的 gem5 内存系统文档，本站版本转为灰度、补白底与边距。[原文与原图](https://www.gem5.org/documentation/general_docs/memory_system/gem5_memory_system/#data-cache-object) · [原站 MIT 许可](/microarch/gem5-website-license.txt)
