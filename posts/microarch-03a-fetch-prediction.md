@@ -157,7 +157,7 @@ BOOM 文档还给出便于 SRAM 读写的实现。方向位和表示惯性的位
 
 ## RAS 为函数返回提供目标 {#predict-ras}
 
-同一个函数可能从多处被调用。它末尾的返回指令地址固定，但此次要回到哪一处，由最近尚未返回的调用决定。**RAS**（Return Address Stack，返回地址栈）按调用嵌套保存预测用的返回地址。BOOM 文档描述的快速预测器在识别返回时用栈顶给出目标，在取指阶段译码出所选控制转移是调用或返回后再压栈或弹栈。
+同一个函数可能从多处被调用。它末尾的返回指令地址固定，但此次要回到哪一处，由最近尚未返回的调用决定。**RAS**（Return Address Stack，返回地址栈）按调用嵌套保存预测用的返回地址。Intel 文档把同类结构称为 **RSB**（Return Stack Buffer，返回栈缓冲区）。BOOM 文档描述的快速预测器在识别返回时用栈顶给出目标，在取指阶段译码出所选控制转移是调用或返回后再压栈或弹栈。
 
 这里的地址和指令都按 32 位指令长度举例。`jal x1, target` 跳往 `target`，同时把调用地址加 4 写入链接寄存器 `x1`。`jalr x0, 0(x1)` 返回时真实目标来自 `x1`，按 JALR 语义清除目标最低位。B 还要调用 C 时，B 需要按调用约定保存原来的 `x1`，例如保存到软件栈，返回前再恢复。预测栈由硬件维护，工作时机在取指，最终还是由实际指令操作数确认去哪里。
 
@@ -217,6 +217,37 @@ BOOM v3 的固定版本中，FTQ 记录取指组看到的栈顶值 `ras_top` 和
 假设 C 调 D 已被前端识别，D 调 E 尚未被识别。改道时恢复下标，再按保存的值回写栈顶。C 和 B 的返回分别会读到什么？
 
 第一次调用只写了槽 0。槽 1 一直是 `0x3404`，因此恢复下标后，C 就能获得正确预测，回写槽 1 也不会改变结果。C 弹栈后，B 仍会读到被覆盖的 `0x4804`，其真实目标是 `0x2204`。
+:::
+
+### x86 的 RSB 与程序栈各保存什么 {#predict-rsb}
+
+看一组 x86-64 的近调用。A 在 `0x2200` 调用 B，B 在 `0x3400` 调用 C。为便于追踪，B 调完 C 就返回，C 也只有一条返回指令。下面是手工编码的指令片段，地址和初始 `RSP` 都是题设。`E8` 后面的四个字节是小端有符号位移，从下一条指令地址算起。例如 `0x2205 + 0x11fb = 0x3400`。
+
+```text
+0x2200  e8 fb 11 00 00   call 0x3400
+0x3400  e8 fb 13 00 00   call 0x4800
+0x3405  c3               ret
+0x4800  c3               ret
+```
+
+设进入 A 的这段代码时 `RSP = 0x8000`。x86-64 的近 `CALL` 将下一条指令的地址压入内存中的程序栈，并转往被调用函数。近 `RET` 从 `RSP` 指向的内存取实际返回地址，再把 `RSP` 加 8。Intel 文档描述的 RSB 则随近调用记录用于预测的返回地址。当取指前端识别到近返回时，可先从 RSB 取得候选目标，无需等栈读取完成后再决定从哪里取指。
+
+| 执行到哪里 | 程序栈和实际目标 | 预测器看到的地址，右侧为栈顶 |
+| --- | --- | --- |
+| A 调 B | `RSP = 0x7ff8`，此处写入 `0x2205` | `[0x2205]` |
+| B 调 C | `RSP = 0x7ff0`，此处写入 `0x3405` | `[0x2205, 0x3405]` |
+| C 返回 | 从 `0x7ff0` 读出 `0x3405`，`RSP` 恢复为 `0x7ff8` | 预测 `0x3405`，余 `[0x2205]` |
+| B 返回 | 从 `0x7ff8` 读出 `0x2205`，`RSP` 恢复为 `0x8000` | 预测 `0x2205`，本例两项均已用完 |
+
+两列给出了相同的返回地址，因为两次调用都有匹配的返回，预测状态也一直可用。若 B 返回时 RSB 没有可用项，程序栈中的 `0x2205` 仍会给出实际目标。Intel 将缺少可用项的情形称为 **RSB 下溢**。调用深度超过容量、调用和返回不成对，都可能使后续返回遇到这种情形。前面两项栈的容量和覆盖策略属于教学模型，Intel 处理器的下溢边界要按具体型号判断。
+
+下溢时还要查具体实现。Intel 文档记载，部分 Skylake 世代的处理器在 RSB 空时允许近 `RET` 改用备用间接预测器，这类行为称为 RSBA。具有 RRSBA 行为的处理器也可能使用备用预测器，但预测目标受当前预测域约束。这里的预测域指硬件用于限制预测目标来源的一组执行上下文，适用范围要结合处理器的预测控制。下溢并不等于一定取得错误目标。分析防护时先确认 `RET` 需要走 RSB 还是可能改走备用路径，再查相应的控制是否覆盖该路径。
+
+::: details 练习｜从另一个调用点进入 B
+
+只把 A 调 B 的五字节指令移到 `0x2600`，重新编码位移，B 和 C 的指令不变。两条 `RET` 各回到哪里？
+
+C 仍回 `0x3405`，因为它由 B 在 `0x3400` 调用。B 改回 `0x2605`，因为 A 的下一条指令地址变了。即使两条 `RET` 的位置完全相同，只凭返回指令自身的地址也推不出这两次目标。
 :::
 
 ## GHR 怎样让同一条分支查到不同表项 {#predict-ghr}
@@ -616,6 +647,8 @@ Intel 对使用 eIBRS（增强间接分支受限推测）或在切换后使用 I
 - [图 1 原图与 BOOM 前端概览](https://docs.boom-core.org/en/latest/sections/branch-prediction/index.html)
 - [图 1 和图 2 的许可文本](/microarch/boom-license.txt)（The Regents of the University of California，BSD 3-Clause）
 - [BOOM 快速预测器与 BTB、BIM、RAS](https://docs.boom-core.org/en/latest/sections/branch-prediction/nl-predictor.html)
+- [Intel 推测执行技术文档，近调用、近返回与 RSB](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/hardware-behavior-related-to-speculative-execution.html)
+- [Intel 对 RSB 下溢及备用预测行为的说明](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/advisory-guidance/return-stack-buffer-underflow.html)
 - [BOOM 后备预测器、FTQ、两位状态表与 GShare](https://docs.boom-core.org/en/latest/sections/branch-prediction/backing-predictor.html)
 - [BOOM v3 固定版本的 FTQ，取指状态、预测更新和重定向](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/ifu/fetch-target-queue.scala)
 - [BOOM v3 固定版本的前端，返回目标选择与栈顶回写](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/ifu/frontend.scala)
