@@ -22,12 +22,16 @@ bookTitle: 微架构安全
 
 跟踪一笔读写时，可以先从地址算出缓存组和行内偏移。若标记查找没有可用的副本，就继续看 MSHR 怎样记录这笔请求及其需要的读写权限。若目标行刚被换出，还要确认它的新数据是否仍在写缓冲中。下面的三个例题分别练习这一条路径上的三个判断。
 
+学习访问顺序时，先读数组扫描的例题，数一数第一遍结束时还留着哪几条行。再读矩阵分批的例题，判断同一块再次被访问前，有多少块与它竞争同一组。前一道题给定整个缓存只能保留两行，后一道题把限制放到一个八路缓存组里。两题都从当前的驻留状态出发，沿新的访问次序判断何时需要重新取行。
+
 先从字节地址算出缓存块，再用复用距离判断为什么同一组数据换个顺序就会多出未命中。随后用同一串地址比较 LRU 与 FIFO，追踪未命中请求和写回。学完单核缓存后，再用一条由两核共享的缓存行推导写权限、失效确认和最新数据的去向。最后把两个计数器放在同一行和不同的行，在两个物理核上比较开销，并学习怎样定位引起伪共享的字段。
 
 1. [缓存行与局部性](./microarch-01-cache.md)
+   - [同一个数组扫描两遍，为什么第二遍还要取行](./microarch-01-cache.html#locality-second-pass){target=_self}
 2. [缓存怎样查找和替换一行](./microarch-01b-cache-mapping.md)
    - [同一份数据有两个虚拟地址时，写入改了哪一行](./microarch-01b-cache-mapping.html#cache-vipt-alias-store){target=_self}
 3. [矩阵按行读和按列读的缓存开销](./microarch-01d-cache-traversal.md)
+   - [不改矩阵布局，也能减少按列读取的未命中](./microarch-01d-cache-traversal.html#matrix-row-tiles){target=_self}
 4. [缓存未命中后如何合并请求](./microarch-01a-mshr.md)
    - [取得写权限后，哪些字节真正变了](./microarch-01a-mshr.html#mshr-write-byte-trace){target=_self}
 5. [写入缓存后，数据什么时候送到下一级](./microarch-01e-cache-stores.md)
