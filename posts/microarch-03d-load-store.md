@@ -173,6 +173,30 @@ S0 和 L 确实重叠，L 的依赖掩码也仍包含 S0。但 LDQ 保存的转�
 
 顺序失败时，L 已经走过取数路径，I 也可能使用了错误输入。BOOM v3 将失败写入 `order_fail`，把失败加载作为内部顺序异常报给 ROB。到达退休位置时，ROB 阻止 L 退休并要求从它的 PC 重新取指。该内部事件无需进入操作系统的异常处理程序。较老的 S 可以先退休。重执行时，如果它仍在 STQ，L 从队列取到 9。如果写入已经完成，L 也可从缓存取得 9。I 第一次算出的 6 随未退休结果一并丢弃，重新执行后得到 10。[乱序执行一课](./microarch-03-execution.md#ooo-retire)介绍了写回和退休两个时点。
 
+### 存储已经退休，缓存拒绝后怎样重发 {#lsu-store-nack}
+
+前面从加载的角度区分了在队列里重试和重新取指。对于已退休的普通存储，BOOM v3 也需要区分三个时点：ROB 允许它向缓存写入、请求通过接口交给缓存流水线、缓存确认这次访问成功。STQ 中的 `committed` 和 `succeeded` 分别记录第一件和最后一件事。地址和数据都保存在队列项里，供缓存访问或收到 `nack` 后重发使用。
+
+沿用写 `0x1000` 的 S，再接一条写 `0x1080` 的 T。假设教学用 STQ 有 8 个槽，S 占槽 7，T 占槽 0，程序中 S 更早。此时的 `stq_head` 指向最老未清除项，即槽 7。`stq_commit_head` 指向下一项等 ROB 提交的存储。`stq_execute_head` 则指向下一项准备向缓存发请求的存储。题设让各事件分开出现，忽略仲裁间隔，表中列出每一步**之后**的状态。
+
+| 事件 | `stq_head` | `stq_commit_head` | `stq_execute_head` |
+| --- | ---: | ---: | ---: |
+| S、T 均已进入 STQ，尚未退休 | 7 | 7 | 7 |
+| ROB 依次退休 S、T，两项的 `committed` 置位 | 7 | 1 | 7 |
+| 缓存接口接下 S 的第一次请求 | 7 | 1 | 0 |
+| 缓存流水线随后对 S 回 `nack` | 7 | 1 | 7 |
+| 缓存接口接下 S 的重发，随后报告访问成功 | 7 | 1 | 0 |
+| 队首看到 S 已提交且成功，清除槽 7 | 0 | 1 | 0 |
+
+第一次握手后，发送指针已经越过 S。`nack` 携带 S 的槽号，LSU 以 `stq_head` 为环形顺序的起点，发现槽 7 比当前的槽 0 更老，于是把发送指针退回 7。此时两个 `committed` 位都保持不变，S 用槽 7 里的地址和数据重发。缓存的成功响应使 S 的 `succeeded` 置位，允许随后释放队首。这个过程不需要 ROB 再退休一次 S，也不意味着其他核心在响应这一拍就一定能读到 9。后者还要沿缓存一致性路径判断。
+
+::: details 练习｜缓存接口第一拍连请求都没接下
+
+将第三行改成缓存接口 `ready = 0`，其余前提不变。发送指针会如何变化，还需要等待 `nack` 才能把指针退回去吗？
+
+没有发生握手，发送指针仍为 7。之后仍从槽 7 选择 S，只在下次握手成功时才推进到槽 0。`nack` 用于处理已经进入缓存流水线、随后却没能成功的那一次尝试。本题没有发生那次尝试。
+:::
+
 ### 为什么要给较老的存储让出一次端口 {#lsu-wakeup-priority}
 
 沿用前面的部分覆盖例子。L 要从 `0x1004` 读四个字节，较新的存储 S 只改了开头两个字节。设更老的全宽存储已经写入缓存，S 也已退休且可以发送，但仍占着 STQ 的队首。为这次读取准备最终值，只差把 S 的两个字节写进缓存。
@@ -390,6 +414,7 @@ dependent add: 6 -> 10
 - [BOOM v3 LSU 对释放通知和重叠加载的检查](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/lsu/lsu.scala#L971-L1036)
 - [RISC-V RVWMO 的保留程序顺序与重叠地址规则](https://docs.riscv.org/reference/isa/unpriv/rvwmo.html)
 - [BOOM v3 单路 LSU 的冲突让行与存储等待计数](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/lsu/lsu.scala#L1086-L1106)
+- [BOOM v3 存储请求的握手与指针推进](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/lsu/lsu.scala#L787-L800) · [缓存拒绝与响应](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/lsu/lsu.scala#L1291-L1340) · [STQ 提交与清除](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/lsu/lsu.scala#L1456-L1524)
 - [BOOM v3 ROB 源码，内部异常与重取指](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/exu/rob.scala#L515)
 - [BOOM ROB 文档，退休与流水线恢复](https://docs.boom-core.org/en/latest/sections/reorder-buffer.html)
 - [RISC-V RVWMO 说明，加载值与存储转发](https://docs.riscv.org/reference/isa/v20260120/unpriv/mm-eplan.html#loadvalueaxiom)
