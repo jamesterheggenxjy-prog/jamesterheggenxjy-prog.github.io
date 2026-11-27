@@ -210,6 +210,28 @@ TRRespass 研究说明，有限的行追踪或采样式 TRR 可能被多侧行�
 
 :::
 
+### 读到的数据已经纠正，为什么还要写回 {#rowhammer-ecc-scrub}
+
+沿用上一节的八位码字。假设 DRAM 里第 5 位已经翻转。一条需求读取经过控制器时，解码器能把第 5 位纠正后交给请求者。若控制器只修正读出的数据，DRAM 里的第 5 位仍是错误的，下一次从这个地址读回又会经过同样的纠错。若此后同一码字的第 6 位也翻转，控制器读到的就是前面算过的双位错误。
+
+| 先后发生的事件 | 只修正返回的数据 | 同时启用读时修复 |
+| --- | --- | --- |
+| 第 5 位翻转后首次读取 | 请求者收到正确值，DRAM 中第 5 位仍错 | 请求者收到正确值，控制器安排修复 |
+| 下一次翻转前，控制器处理完已安排的修复 | DRAM 仍保留第 5 位错误 | 正确码字已写回 |
+| 此后第 6 位翻转，再次读取 | 两位错，SECDED 可以检测 | 只剩第 6 位错，本次仍可纠正 |
+
+AMD PG313 文档把前台触发的修复称为 **on-the-fly scrubbing**。正常读发现可纠正错误后，控制器为同一个地址安排一次读、改、写操作。它要重新读取，是因为原来的读与稍后的修复之间，程序可能已经向该地址写了新数据。若直接把原来纠正过的旧数据写回，反而会覆盖较新的写入。
+
+同一实现还有**后台巡检**（background scrubbing）。控制器主动遍历内存地址，即使应用从不读某个码字，也有机会发现并修复其中的单比特错误。两种方式的区别在触发条件。读时修复要等一次正常读取，后台巡检则依靠自己的调度进度。两者都要占用访存资源。DRAM 的周期刷新负责恢复单元上的电荷，巡检则读出码字并检查其校验关系，因此两者各有自己的时间窗口。
+
+::: details 练习｜第二个错误在写回之前到达
+
+需求读取刚纠正并返回第 5 位时，第 6 位也在修复完成前翻转。已经返回的读取和随后发起的巡检能否得出相同的结果？
+
+第一次读取仍交付正确值，因为它当时只看到第 5 位错误。后续修复重新读取同一码字时已经有两位错，只能按不可纠正错误处理。评估巡检的作用，要比较两次翻转的间隔与真实修复完成时间。
+
+:::
+
 ## 参考文献
 
 - [Kim 等，Flipping Bits in Memory Without Accessing Them: An Experimental Study of DRAM Disturbance Errors，ISCA 2014](https://istc-cc.cmu.edu/publications/papers/2014/kim-isca14.pdf)
@@ -219,6 +241,7 @@ TRRespass 研究说明，有限的行追踪或采样式 TRR 可能被多侧行�
 - [Phoenix：DDR5 上的 Rowhammer 与自校准刷新同步，IEEE S&P 2026](https://comsec.ethz.ch/research/dram/phoenix/)
 - [GPUThor：非均匀访问模式与 ECC 保护的 GPU，ACM CCS 2026](https://gputhor.com/)
 - [AMD UG586，内存控制器的 ECC 编码、解码和错误状态](https://docs.amd.com/r/en-US/ug586_7Series_MIS/Error-Correcting-Code)
+- [AMD PG313，按需 ECC 修复和后台内存巡检](https://docs.amd.com/r/en-US/pg313-network-on-chip/ECC-Scrubbing)
 - [内存控制器怎样选择 DRAM 行与列命令](./microarch-06b-memory-queue.md#memory-row)
 - [地址怎样映射到 DRAM 的 bank 和 row](./microarch-06b-memory-queue.md#memory-address-mapping)
 
