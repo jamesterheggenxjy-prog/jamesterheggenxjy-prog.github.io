@@ -84,6 +84,26 @@ $\gcd(65,64)=1$，组号每 64 行绕回。$260=4\times64+4$，前四组各有 5
 
 :::
 
+### 同一个循环读两张矩阵，为什么每批只能留四行 {#matrix-two-stream-tiles}
+
+仍读取前 9 行、每行前 16 列。现在每次处理一个坐标 `(r, c)`，要先读 A 的元素再读 B 的元素，例如求两个矩阵的对应元素乘积之和。假定使用无符号累加，允许按行分批。两张矩阵的行跨度都是 4096 字节，基址分别是 `0x20000` 和 `0x40000`。B 与 A 的基址之差是 `0x20000`，即 2048 条缓存行，恰好是 64 组的整数倍。因此两张矩阵各行的前 16 列仍全部落到第 0 组，但对应的标记不同。缓存使用前面的八路精确 LRU 模型，忽略其他访存。
+
+每批内部按列读取。第 0 列如果读 4 行，访问顺序就是 A0、B0、A1、B1、A2、B2、A3、B3，恰好有 8 个不同块。下一列再次读到 A0 前，这组只访问过另外 7 个不同块，A0 仍在。一批若放 5 行，就会重复扫描 10 个同组块。第 0 列末尾时，A0、B0 已被换出。第 1 列再次读 A0 时，还会挤掉最旧的驻留块 A1。随后访问也会沿相同顺序替换，因此满 5 行的一批在每一列都未命中 10 次。
+
+| 分批方式 | 每批的同组块数 | 9 行共 288 次读取中的未命中 |
+| --- | --- | ---: |
+| 每批最多 4 行，分成 4、4、1 | 8、8、2 | `8 + 8 + 2 = 18` |
+| 每批最多 5 行，分成 5、4 | 10、8 | `10 × 16 + 8 = 168` |
+
+第一种安排里，每批读完以后，剩下的批次不再用这些块，所以新批换掉旧批的块也无妨。选分块高度时，要把**同一组内同时需要反复使用的所有输入**一起算。本例每行贡献两条同组缓存行，八路中最多留下四行。若程序还在同一循环写入目标数组，并且目标采用写分配，也要把它占用的行一起算进去。
+
+::: details 练习｜只移动 B 的基址
+
+把 B 移到 `0x40040`，行跨度保持 4096 字节。若恢复每批最多 8 行，仍会发生反复替换吗？
+
+移动了一个整块，B 的目标行全进入第 1 组，A 仍在第 0 组。前 8 行每组各占八路，因而前一批只有 16 次首次未命中，最后一行再有 2 次，共 18 次。布局改变的是竞争发生在哪个组。若只移动 4 字节，组索引和一行跨过多少块都需要重新计算，不能套用移动一整行的结果。
+:::
+
 ## 用两个循环复算访问序列
 
 下面用 C11 复算不同的遍历方式和节末的 16 路练习。用 `group` 找到组，再在该组比较标记。每组的有效路从最近使用排到最久使用。组未满时，新行占用一个空位置。组已满时，最后一个位置的旧标记被覆盖。每次遍历都从一份空缓存开始。
@@ -127,13 +147,14 @@ static unsigned touch(struct Set sets[], unsigned address,
     return miss;
 }
 
-static unsigned element_address(unsigned row, unsigned col, unsigned stride)
+static unsigned element_address(unsigned base, unsigned row, unsigned col,
+                                unsigned stride)
 {
-    return BASE + row * stride + col * 4;
+    return base + row * stride + col * 4;
 }
 
 static unsigned count_misses(unsigned stride, bool by_column, unsigned ways,
-                             unsigned rows_per_tile)
+                             unsigned rows_per_tile, unsigned second_base)
 {
     struct Set sets[MAX_SETS] = {0};
     unsigned set_count = LINES / ways;
@@ -145,14 +166,18 @@ static unsigned count_misses(unsigned stride, bool by_column, unsigned ways,
             if (end > ROWS)
                 end = ROWS;
             for (unsigned col = 0; col < COLS; ++col)
-                for (unsigned row = first; row < end; ++row)
-                    misses += touch(sets, element_address(row, col, stride),
+                for (unsigned row = first; row < end; ++row) {
+                    misses += touch(sets, element_address(BASE, row, col, stride),
                                     set_count, ways);
+                    if (second_base != 0)
+                        misses += touch(sets, element_address(second_base, row, col, stride),
+                                        set_count, ways);
+                }
         }
     } else {
         for (unsigned row = 0; row < ROWS; ++row)
             for (unsigned col = 0; col < COLS; ++col)
-                misses += touch(sets, element_address(row, col, stride),
+                misses += touch(sets, element_address(BASE, row, col, stride),
                                 set_count, ways);
     }
     return misses;
@@ -160,11 +185,14 @@ static unsigned count_misses(unsigned stride, bool by_column, unsigned ways,
 
 int main(void)
 {
-    printf("by row, 8 ways: %u\n", count_misses(4096, false, 8, ROWS));
-    printf("by column, 8 ways: %u\n", count_misses(4096, true, 8, ROWS));
-    printf("padded, by column, 8 ways: %u\n", count_misses(4160, true, 8, ROWS));
-    printf("by column, 16 ways: %u\n", count_misses(4096, true, 16, ROWS));
-    printf("8 rows per tile, by column: %u\n", count_misses(4096, true, 8, 8));
+    printf("by row, 8 ways: %u\n", count_misses(4096, false, 8, ROWS, 0));
+    printf("by column, 8 ways: %u\n", count_misses(4096, true, 8, ROWS, 0));
+    printf("padded, by column, 8 ways: %u\n", count_misses(4160, true, 8, ROWS, 0));
+    printf("by column, 16 ways: %u\n", count_misses(4096, true, 16, ROWS, 0));
+    printf("8 rows per tile, by column: %u\n", count_misses(4096, true, 8, 8, 0));
+    printf("A and B, 4 rows per tile: %u\n", count_misses(4096, true, 8, 4, 0x40000));
+    printf("A and B, 5 rows per tile: %u\n", count_misses(4096, true, 8, 5, 0x40000));
+    printf("A and shifted B, 8 rows per tile: %u\n", count_misses(4096, true, 8, 8, 0x40040));
     return 0;
 }
 ```
@@ -175,6 +203,9 @@ by column, 8 ways: 144
 padded, by column, 8 ways: 9
 by column, 16 ways: 9
 8 rows per tile, by column: 9
+A and B, 4 rows per tile: 18
+A and B, 5 rows per tile: 168
+A and shifted B, 8 rows per tile: 18
 ```
 
 下表把程序中最关键的三次组内更新单独列出。按列读取且行跨度为 4096 字节时，`0x20000 / 64 = 0x800`，组号为 0，标记为 `0x20`。每向下走一行，标记加一，组号仍为 0。因此表中的 A0、A1 分别对应标记 `0x20`、`0x21`。
@@ -187,7 +218,7 @@ by column, 16 ways: 9
 
 先行后列的前两笔地址为 `0x20000` 和 `0x20004`，落在同一行。先列后行的前两笔为 `0x20000` 和 `0x21000`，各占一行，却落在同一个组。加填充后，第二笔改为 `0x21040`，落到下一组。改变的 64 字节只出现在行跨度中，对所读元素的行、列下标没有影响。
 
-最后一行输出来自 `rows_per_tile = 8`。外层循环第一次把行范围限制为 `[0, 8)`，第二次由 `end` 截到 `[8, 9)`。两批之间缓存状态保留，因此第二批仍会换出一个旧块。被换出的块已经用完，替换不会增加之后的缺失。
+第五行输出对应单矩阵的 `rows_per_tile = 8`。外层循环第一次把行范围限制为 `[0, 8)`，第二次由 `end` 截到 `[8, 9)`。两批之间缓存状态保留，因此第二批仍会换出一个旧块。被换出的块已经用完，替换不会增加之后的缺失。最后三行传入了 B 的基址，让按列路径对每个坐标连续访问 A 和 B。两个地址共用同一个 `sets` 数组，所以只要组号相同，访问 B 就可能替换 A 的块。
 
 ## 从命中率估计访问代价
 
