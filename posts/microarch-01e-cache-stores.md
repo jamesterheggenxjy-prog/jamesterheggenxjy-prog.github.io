@@ -48,6 +48,28 @@ sw t1, 36(a0)
 
 采用**不写分配**（no write allocate）时，未命中的存储交给下一级处理，本级不保留该行。若下一级支持四字节更新，就在那里应用本次存储的范围。随后第一次从本级读 A，仍会因没有本地副本而未命中。
 
+### 两笔局部写什么时候能省去整行读取 {#store-whole-line}
+
+仍设本级没有块 A，块首为 `0x1000`，行长 64 字节。上游已经准备好两个普通的写请求包。W0 从 `0x1000` 开始写 32 字节，内容全是 `aa`。W1 从 `0x1020` 开始写另 32 字节，内容全是 `bb`。这两个包中的字节都有效。假定它们进入同一个 MSHR 的当前目标列表，两个包均在下行包构造前到达，并采用填充后在本级保留新行的策略。
+
+在 gem5 v24.1.0.3 的经典缓存中，MSHR 的目标列表用 `writesBitmap` 表示已覆盖的字节，每一位对应行内一个位置。收到允许合并的写时，先按地址求行内偏移，再在位图中标出包覆盖的区间。原始写包继续保留在目标列表中，实际新数据仍来自这些包。
+
+| 已收到的写包 | 行内偏移 `0x00`–`0x1f` | 行内偏移 `0x20`–`0x3f` | 下行包若现在构造 |
+| --- | --- | --- | --- |
+| 仅 W0 | 已覆盖 | 未覆盖 | `ReadExReq`，取整行数据和写权限 |
+| W0、W1 | 已覆盖 | 已覆盖 | `InvalidateReq`，取得写权限并使其他副本失效 |
+
+第二行中的写仍要等待一致性交接。不同之处在于，本级凑齐了 64 个新字节，无需靠回包补全旧内容。gem5 标记这轮已发请求为 `wasWholeLineWrite`，处理失效响应时仍能按填充路径建立可写的缓存行，再用目标列表里的写数据填满它。稍后读 `0x1020`，会从 W1 写入的区域取到 `0xbbbbbbbb`。上表比较的是是否需要下级返回旧行的数据，两种请求都还有控制消息。缓存后来换出这条脏行时，仍可能传送一次整行写回。
+
+::: details 练习｜两笔写之间插了一次读
+
+保持 W0、W1 的地址和内容，改成 W0、R、W1 先后进入目标列表。R 从 `0x1020` 读四字节，该位置的旧值是 5。最后两个写包的范围加起来仍然覆盖全行，能否直接按整行写发出？
+
+不能。R 到来时，目标列表只记录了前半行的写覆盖，后半行的旧字节仍是这次读取的输入。源码在覆盖全行之前遇到读，会关闭后续写合并。构造下行包时仍需取得旧数据和写权限。在按该顺序满足目标的题设下，R 读到 5，W1 随后才把它改成 `0xbbbbbbbb`。若改成 W0、W1、R，先到的两笔写已经覆盖全行，R 需要的是新数据，可以随整行写完成。
+:::
+
+还有一个时间边界。如果 W0 的 `ReadExReq` 已经被下一级接受，W1 后到即使补齐覆盖，也不能把这轮在途请求改成 `InvalidateReq`。因此回包处理要用发送时记录的 `wasWholeLineWrite`，不能只看回包时列表里已有多少写数据。这个区别可以与 [MSHR 的发送重试例题](./microarch-01a-mshr.md#mshr-send-retry)对照。
+
 ## 脏位决定替换时怎样处理数据 {#store-dirty-bit}
 
 **写直达**（write-through）会将本级更新也交给下一级，可以通过缓冲排队。**写回**（write-back）允许更新暂时只留在本级，用脏状态记录还需转交的修改。选择写入时是否分配，与选择何时传播更新，是缓存的两项决策。
@@ -373,6 +395,7 @@ skip second B, bytes down: 0
 - [MIT 6.004 缓存与写入策略讲义](https://ocw.mit.edu/courses/6-004-computation-structures-spring-2017/pages/c14/c14s1/)
 - 图 1 来自 Djordje Kovacevi 的 gem5 内存系统文档，本站版本转为灰度、补白底与边距。[原文与原图](https://www.gem5.org/documentation/general_docs/memory_system/gem5_memory_system/#data-cache-object) · [原站 MIT 许可](/microarch/gem5-website-license.txt)
 - [gem5 v24.1.0.3 对局部写入、升级及整行写的请求选择](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/cache.cc#L492-L566)
+- [gem5 v24.1.0.3 的 MSHR 写覆盖记录与合并条件](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/mshr.cc#L117-L157) · [发送时保存整行写判定](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/mshr.cc#L346-L361) · [响应与填充判定](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/cache/base.cc#L546-L564)
 - [gem5 的写回包构造与数据复制](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/base.cc#L1710-L1756)
 - [gem5 写回队列的表项字段](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/write_queue_entry.cc#L83-L109)
 - [gem5 对写缓冲和 MSHR 的仲裁](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/cache/base.cc#L859-L906)
