@@ -78,6 +78,30 @@ I3 的 P22 来自整数加法。BOOM 文档描述的快速唤醒可以在 I2 发
 I1 较老，本拍获得端口。I3 的两个源仍然就绪，留在队列继续申请。下一拍端口可用且没有更高优先级的请求时，I3 就能发射。这里无需再次等待 P22 写回。
 :::
 
+### 两个发射端口空着，为什么只发出一条指令 {#ooo-issue-ports}
+
+把上一题扩展到有两个发射端口的整数队列。I1 已收到 P20，能够执行 `add`。紧接着有一条独立的整数除法 D，两个源也已就绪。假定两条操作已经进入队列，I1 位于较老的槽，D 位于较新的槽。下面的端口配置与周期是题设，用来计算 BOOM v3 年龄有序队列的端口选择规则。
+
+| 发射端口 | 可接收的操作 | 本拍开始时的状态 |
+| --- | --- | --- |
+| 0 | 整数算术、整数除法 | 对应单元都能接收 |
+| 1 | 整数算术 | 对应单元能接收 |
+
+选择器有两组输入。从队列槽读出 `request` 和操作类别 `fu_code`，从端口读出本拍可接收的功能集合 `fu_types`。两者的类别掩码做按位与，结果非零才算端口匹配。端口还得没有分配给别的槽。同一个槽已获得端口后，也不能再占另一个端口。这里使用的固定版本按槽号从小到大比较，每个槽再按端口号从小到大尝试。年龄有序队列把较老的操作靠前放，因此本题先处理 I1。
+
+1. I1 先检查端口 0。整数算术匹配，端口空闲，于是 I1 获得端口 0。选择器把 I1 的操作和物理寄存器编号送往寄存器读取级。
+2. D 也在请求发射。端口 0 类型匹配，但已经分配给 I1。端口 1 仍空着，却不支持整数除法。D 只能留在队列。
+3. 下一拍若端口 0 仍可接收除法，且没有更老的匹配者，D 就能发射。等待这段期间，D 的源寄存器已经就绪，无需再等一次唤醒。
+
+从连接关系上看，I1 用端口 1、D 用端口 0 可以同拍发出两条。题中的选择器在处理到 D 时，已经把 I1 分给端口 0，并不会回头重排。这说明两条指令都已就绪、机器有两个发射端口，也不能单凭这两个条件推断本拍能发出两条。要沿着槽优先级和端口的功能约束逐项检查。
+
+::: details 练习｜除法器忙时，把 D 放到更老的槽
+
+令 D 比 I1 老，同时端口 0 上的非流水化除法器仍在处理更早的一条指令。端口 0 本拍仍能接收整数算术，但从可用功能集中撤掉除法。两条操作会各走哪条路径？若下一拍除法器可用，当时还剩谁要发射？
+
+D 首先接受检查，但两个端口都没有可用的除法功能，因此一个端口也不占。I1 随后通过端口 0 发射。到下一拍，只剩 D 仍在申请，若除法功能恢复，D 就可用端口 0 发出。D 在队列中较老，只表示它优先尝试匹配，符合条件的年轻指令仍可以先发射。
+:::
+
 ## 加法先写回，为什么仍要等加载退休 {#ooo-retire}
 
 **发射**决定哪条操作能进入执行单元。**写回**使该操作产生的值可以被内部依赖使用。**退休**（commit）则让指令的架构效果在程序顺序中生效。在 BOOM 这样的显式重命名设计中，结果在退休前后都可以存于同一个物理寄存器，硬件改变的是架构名称的已提交版本，并回收不再需要的旧位置。
@@ -474,6 +498,7 @@ I2 的旧源变为 P20，新目的仍是 P22。I3 等 P22，P22 又等 I0 写回
 - [BOOM 流水线总体结构与阶段](https://docs.boom-core.org/en/latest/sections/intro-overview/boom-pipeline.html)
 - [BOOM 重命名、忙表、空闲表和恢复](https://docs.boom-core.org/en/latest/sections/rename-stage.html)
 - [BOOM 发射队列与唤醒机制](https://docs.boom-core.org/en/latest/sections/issue-units.html)
+- [BOOM v3 年龄有序队列的槽与端口选择](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/exu/issue-units/issue-unit-age-ordered.scala#L105-L125)
 - [BOOM 发射槽原图](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/docs/figures/issue_slot.png) · [BSD 3-Clause 许可](/microarch/boom-license.txt)
 - [BOOM 的 ROB、提交和异常处理](https://docs.boom-core.org/en/latest/sections/reorder-buffer.html)
 - [RISC-V 特权规范的 `stvec`、`sepc`、`scause` 和 `stval`](https://docs.riscv.org/reference/isa/priv/supervisor.html)
