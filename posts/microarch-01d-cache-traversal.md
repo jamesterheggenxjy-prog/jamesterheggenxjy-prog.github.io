@@ -27,60 +27,149 @@ book: microarch-00-intro
 
 **改变布局。** 若每行增加 64 字节填充，逻辑元素仍为 1024 个，则行跨度从 4096 增到 4160 字节。前 16 列仍各占一行。相邻块号增加 65，组号每次相差 1，9 行落入连续的 9 个组。在题设下，先列后行也只需 9 次填充。这个例题把现象定位到组索引和访问顺序。单看数组总大小或访问总次数都无法得到这一结论。
 
+### 把行跨度换成组号 {#matrix-stride-sets}
+
+基址 `0x20000` 除以 64 得到块号 `0x800`，它对 64 取余为 0。下表只列每行第一个元素。前 16 个元素占满这条行，所以表中的组号也适用于本题读到的该行其他元素。
+
+| 行号 | 原跨度 4096 字节的行首／组号 | 填充后跨度 4160 字节的行首／组号 |
+| ---: | --- | --- |
+| 0 | `0x20000`／0 | `0x20000`／0 |
+| 1 | `0x21000`／0 | `0x21040`／1 |
+| 2 | `0x22000`／0 | `0x22080`／2 |
+| 8 | `0x28000`／0 | `0x28200`／8 |
+
+例如填充后第 2 行的行首是 `0x20000 + 2 × 0x1040 = 0x22080`。块号为 `0x882`，对 `0x40` 取余得到组 2。这里每次跨 65 块，而 65 除以 64 余 1，所以组号逐行加一。表中的填充字节位于每个逻辑行之后，程序读取的仍是每行前 16 个元素。
+
+::: details 练习｜每行多填充两条缓存行
+
+只把每行的填充从 64 字节改为 128 字节。第 0、1、2 行的组号分别是什么？这 9 条被读取的行还会都落在同一组吗？
+
+新跨度为 4224 字节，即 66 个块。组号每次增加 2，因此前三行为 0、2、4，前 9 行分别落在组 0、2、4、6、8、10、12、14、16。它们不再全挤在第 0 组。本题仅讨论给定的低位组索引，其他处理器可能采用不同映射。
+:::
+
+### 不改矩阵布局，也能减少按列读取的未命中 {#matrix-row-tiles}
+
+保持 4096 字节的原始行跨度。假定计算允许交换不同元素的处理先后，例如用无符号整数做求和。现在先处理第 0 至 7 行，再处理第 8 行。每批内部仍然逐列访问，变化的是一轮要反复使用多少条同组缓存行。
+
+| 当前批 | 第 0 列读完时 | 其余 15 列 | 本批未命中 |
+| --- | --- | --- | ---: |
+| 第 0 至 7 行 | 第 0 组恰好存下 A0 至 A7 | 每次重用一块之前只访问另外 7 块，均命中 | 8 |
+| 第 8 行 | 首次访问 A8，换出 A0 | 其余元素连续命中 A8，上一批已用完 A0 | 1 |
+
+读取总数仍是 144，涉及的地址也完全相同，未命中从 144 降到 9。这个变化只调整了访问次序。前面的行尾填充则调整地址与组号的对应关系。两种做法在本题里得到相同的未命中数，适用条件各有不同。某些计算要求完成整列后才能处理下一列，此时跨列调整顺序要先核对依赖。
+
+::: details 练习｜只分列，还是一次访问全部九行
+
+将 16 列分成两批，每批 8 列，各批内部仍按列扫描全部九行。未命中会降到 9 吗？
+
+不会。访问顺序仍是第 0 列到第 15 列，每列依次访问 A0 至 A8。相邻两次使用同一块之间仍隔着另外 8 个同组块，精确 LRU 下仍是 144 次未命中。
+
+:::
+
 ## 用两个循环复算访问序列
 
-下面的 Python 程序只生成一次求和会发出的加载地址。两段循环枚举相同的元素，区别在于哪个下标先变化。`miss_count` 用块号对 64 取余定位缓存组。每组从左到右保存最近到最久使用的块号，块命中时先移到最左边，组满时丢掉最右边。每次调用都重新创建一个空缓存，因此三次结果可直接比较。
+下面用 C11 复算不同的遍历方式和节末的 16 路练习。用 `group` 找到组，再在该组比较标记。每组的有效路从最近使用排到最久使用。组未满时，新行占用一个空位置。组已满时，最后一个位置的旧标记被覆盖。每次遍历都从一份空缓存开始。
 
-```python
-ROWS = 9
-COLS = 16
-BASE = 0x20000
-ELEMENT_BYTES = 4
-LINE_BYTES = 64
-SET_COUNT = 64
-WAYS = 8
+将代码保存为 `matrix_cache.c`，执行 `gcc -std=c11 -O2 -Wall -Wextra matrix_cache.c -o matrix_cache` 后运行。
 
+```c
+#include <stdbool.h>
+#include <stdio.h>
 
-def row_order(stride):
-    for row in range(ROWS):
-        for col in range(COLS):
-            yield BASE + row * stride + col * ELEMENT_BYTES
+enum { ROWS = 9, COLS = 16, BASE = 0x20000, LINE_BYTES = 64 };
+enum { LINES = 512, MAX_SETS = 64, MAX_WAYS = 16 };
 
+struct Set {
+    unsigned valid;
+    unsigned tag[MAX_WAYS];
+};
 
-def column_order(stride):
-    for col in range(COLS):
-        for row in range(ROWS):
-            yield BASE + row * stride + col * ELEMENT_BYTES
+static unsigned touch(struct Set sets[], unsigned address,
+                      unsigned set_count, unsigned ways)
+{
+    unsigned block = address / LINE_BYTES;
+    unsigned group = block % set_count;
+    unsigned tag = block / set_count;
+    struct Set *set = &sets[group];
 
+    unsigned rank = 0;
+    while (rank < set->valid && set->tag[rank] != tag)
+        ++rank;
+    bool miss = rank == set->valid;
 
-def miss_count(addresses):
-    groups = [[] for _ in range(SET_COUNT)]
-    misses = 0
-    for address in addresses:
-        block = address // LINE_BYTES
-        group = groups[block % SET_COUNT]
-        if block in group:
-            group.remove(block)
-        else:
-            misses += 1
-        group.insert(0, block)
-        if len(group) > WAYS:
-            group.pop()
-    return misses
+    if (miss) {
+        if (set->valid < ways)
+            ++set->valid;
+        else
+            rank = ways - 1;
+    }
+    for (unsigned i = rank; i > 0; --i)
+        set->tag[i] = set->tag[i - 1];
+    set->tag[0] = tag;
+    return miss;
+}
 
+static unsigned element_address(unsigned row, unsigned col, unsigned stride)
+{
+    return BASE + row * stride + col * 4;
+}
 
-print("先行后列", miss_count(row_order(4096)))
-print("先列后行", miss_count(column_order(4096)))
-print("增加填充", miss_count(column_order(4160)))
+static unsigned count_misses(unsigned stride, bool by_column, unsigned ways,
+                             unsigned rows_per_tile)
+{
+    struct Set sets[MAX_SETS] = {0};
+    unsigned set_count = LINES / ways;
+    unsigned misses = 0;
+
+    if (by_column) {
+        for (unsigned first = 0; first < ROWS; first += rows_per_tile) {
+            unsigned end = first + rows_per_tile;
+            if (end > ROWS)
+                end = ROWS;
+            for (unsigned col = 0; col < COLS; ++col)
+                for (unsigned row = first; row < end; ++row)
+                    misses += touch(sets, element_address(row, col, stride),
+                                    set_count, ways);
+        }
+    } else {
+        for (unsigned row = 0; row < ROWS; ++row)
+            for (unsigned col = 0; col < COLS; ++col)
+                misses += touch(sets, element_address(row, col, stride),
+                                set_count, ways);
+    }
+    return misses;
+}
+
+int main(void)
+{
+    printf("by row, 8 ways: %u\n", count_misses(4096, false, 8, ROWS));
+    printf("by column, 8 ways: %u\n", count_misses(4096, true, 8, ROWS));
+    printf("padded, by column, 8 ways: %u\n", count_misses(4160, true, 8, ROWS));
+    printf("by column, 16 ways: %u\n", count_misses(4096, true, 16, ROWS));
+    printf("8 rows per tile, by column: %u\n", count_misses(4096, true, 8, 8));
+    return 0;
+}
 ```
 
 ```text
-先行后列 9
-先列后行 144
-增加填充 9
+by row, 8 ways: 9
+by column, 8 ways: 144
+padded, by column, 8 ways: 9
+by column, 16 ways: 9
+8 rows per tile, by column: 9
 ```
 
+下表把程序中最关键的三次组内更新单独列出。按列读取且行跨度为 4096 字节时，`0x20000 / 64 = 0x800`，组号为 0，标记为 `0x20`。每向下走一行，标记加一，组号仍为 0。因此表中的 A0、A1 分别对应标记 `0x20`、`0x21`。
+
+| 加载结束后 | 第 0 组，从最近排到最久 | 这次淘汰的行 |
+| --- | --- | --- |
+| 第 0 列，第 7 行 | A7、A6、A5、A4、A3、A2、A1、A0 | 无 |
+| 第 0 列，第 8 行 | A8、A7、A6、A5、A4、A3、A2、A1 | A0 |
+| 第 1 列，第 0 行 | A0、A8、A7、A6、A5、A4、A3、A2 | A1 |
+
 先行后列的前两笔地址为 `0x20000` 和 `0x20004`，落在同一行。先列后行的前两笔为 `0x20000` 和 `0x21000`，各占一行，却落在同一个组。加填充后，第二笔改为 `0x21040`，落到下一组。改变的 64 字节只出现在行跨度中，对所读元素的行、列下标没有影响。
+
+最后一行输出来自 `rows_per_tile = 8`。外层循环第一次把行范围限制为 `[0, 8)`，第二次由 `end` 截到 `[8, 9)`。两批之间缓存状态保留，因此第二批仍会换出一个旧块。被换出的块已经用完，替换不会增加之后的缺失。
 
 ## 从命中率估计访问代价
 
