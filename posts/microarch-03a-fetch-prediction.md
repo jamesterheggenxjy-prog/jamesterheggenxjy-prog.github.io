@@ -196,6 +196,29 @@ BOOM 文档还给出便于 SRAM 读写的实现。方向位和表示惯性的位
 三次调用后栈为 `[0x2204, 0x3404, 0x4804]`。依次弹出 `0x4804`、`0x3404`、`0x2204`，三次返回都有对应预测目标。
 :::
 
+### 分支改道时，返回地址栈要恢复什么 {#predict-ras-repair}
+
+仍用两项循环栈。A 调 B、B 调 C 之后，槽 0 保存 `0x2204`，槽 1 保存 `0x3404`，栈顶下标为 1。这次 C 的一条条件分支预测走了调用 D 的路径，实际应当直接走到 C 的返回。执行端确认分支方向以前，前端已经看到错误路径上的两条调用。先按取指顺序算出两次写入的位置。
+
+| 时刻 | 槽 0 | 槽 1 | 栈顶下标 |
+| --- | --- | --- | --- |
+| C 的条件分支开始预测 | `0x2204` | `0x3404` | 1 |
+| 前端看到 C 在 `0x4800` 调 D | `0x4804` | `0x3404` | 0 |
+| 前端看到 D 在 `0x5200` 调 E | `0x4804` | `0x5204` | 1 |
+| 改道时只恢复下标 | `0x4804` | `0x5204` | 1 |
+| 改道时恢复下标并回写旧栈顶 | `0x4804` | `0x3404` | 1 |
+
+两次调用都没有真正执行到提交，却已改写了预测器。只恢复下标时，C 的返回会读出槽 1 的 `0x5204`。若检查点还保存了旧栈顶地址，就能把 `0x3404` 写回槽 1，让 C 的这次返回获得正确预测。随后弹掉槽 1，B 的返回会读到槽 0 的 `0x4804`。要连 B 的预测也恢复，就得保留槽 0 被覆盖前的内容。无论采用哪种修复，C 和 B 的真实返回目标仍由各自返回时的 `x1` 决定。
+
+BOOM v3 的固定版本中，FTQ 记录取指组看到的栈顶值 `ras_top` 和下标 `ras_idx`。发出重定向时，FTQ 把这对值送回前端。配置启用 `enableRasTopRepair` 时，前端用它对 RAS 执行一次定址回写。这个接口一次能修复一个槽。上表用两项栈说明这笔回写能恢复什么，容量和取指时序均为题设。
+
+::: details 练习｜错误路径只看到一次调用
+
+假设 C 调 D 已被前端识别，D 调 E 尚未被识别。改道时恢复下标，再按保存的值回写栈顶。C 和 B 的返回分别会读到什么？
+
+第一次调用只写了槽 0。槽 1 一直是 `0x3404`，因此恢复下标后，C 就能获得正确预测，回写槽 1 也不会改变结果。C 弹栈后，B 仍会读到被覆盖的 `0x4804`，其真实目标是 `0x2204`。
+:::
+
 ## GHR 怎样让同一条分支查到不同表项 {#predict-ghr}
 
 设一条较早的分支先区分两种记录格式，较晚的公共代码再判断其中的可选字段。假如一种格式通常带这个字段，前一条分支的方向就能帮助预测后一条。只将后一条分支的所有执行汇入一个计数器，会把两类输入的结果混在一起。
@@ -351,6 +374,8 @@ int main(void)
 三次运行的最后一行依次是 `provider length=8 final=N`、`provider length=8 final=T` 和 `provider length=4 final=N`。第一次查询中，`alternate` 已接到短表计数给出的 N，长表的弱计数采用这份备用方向。即使某张较短的表自身也是弱态，传给更长表作备用的仍是该较短表计数的最高位。全都未命中时，输出会保留传入方向，此时程序用长度 0 表示没有匹配的表。
 
 ## 预测走错后怎样恢复 {#predict-recovery}
+
+前面的[返回地址栈例题](#predict-ras-repair)恢复的是栈顶下标和槽中的返回地址。本节继续追踪另一份状态，也就是供方向预测表查询的全局方向历史。
 
 回到例题中的 `beq`，把它记作 B，令 `x10 = 1`。实际应按 N 走顺序路径。在这个时序里，NLP 先给出 T，稍后的 BPD 用历史 `001` 查到项 4，也给出 T。预测取指进入 `0x1080`。错误路径还有位于 `0x1084` 的第二条 `beq`，记作 C。假设前端已将它预测为 N，并把 0 加入历史。执行端现在才得到 B 的比较结果。
 
@@ -593,6 +618,7 @@ Intel 对使用 eIBRS（增强间接分支受限推测）或在切换后使用 I
 - [BOOM 快速预测器与 BTB、BIM、RAS](https://docs.boom-core.org/en/latest/sections/branch-prediction/nl-predictor.html)
 - [BOOM 后备预测器、FTQ、两位状态表与 GShare](https://docs.boom-core.org/en/latest/sections/branch-prediction/backing-predictor.html)
 - [BOOM v3 固定版本的 FTQ，取指状态、预测更新和重定向](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/ifu/fetch-target-queue.scala)
+- [BOOM v3 固定版本的前端，返回目标选择与栈顶回写](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/ifu/frontend.scala)
 - [BOOM v3 固定版本的核心，分支重定向与 ROB 整体清空](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/exu/core.scala)
 - [RISC-V 非特权指令集中的控制转移与返回预测提示](https://docs.riscv.org/reference/isa/unpriv/rv32.html#control-transfer-instructions)
 - [Pathfinder 作者论文](https://cseweb.ucsd.edu/~tullsen/Pathfinder_asplos24.pdf)
