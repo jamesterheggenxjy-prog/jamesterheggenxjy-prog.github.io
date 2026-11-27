@@ -107,6 +107,28 @@ gem5 v24.1.0.3 的 Ruby `MESI_Two_Level` 用私有 L1 和共享 L2 实现了这�
 
 :::
 
+### LLC 还有空路，为什么私有副本也可能被撤销 {#llc-snoop-filter}
+
+上面的例题由共享层的数据替换触发失效。另一些设计把数据和私有副本的记录分开保存。**探测过滤器**（snoop filter）根据块地址查找可能持有副本的核心及相关状态。控制器据此决定向谁发一致性探测，避免每笔请求都广播。对于同一块地址，LLC 的数据查询可以未命中，过滤器却仍记得某个核心持有该块。遇到这种状态时，要按记录和协议决定向谁取数。
+
+两种结构也分别占空间。下面用一个简化控制器说明记录槽如何先于数据槽用满。仍用 `A0 = 0x2000`、`A1 = 0x2100`、`B1 = 0x2400`。这三个块都选中前文四路 LLC 的第 0 组。另设它们恰好由过滤器的同一个两项集合跟踪。表中只列这一组的状态，两个结构的索引和槽数都是题设。
+
+| 事务完成后 | LLC 第 0 组中的数据 | 过滤器记录的私有副本 |
+| --- | --- | --- |
+| 初态 | `A1`，还空三路 | `A0 → 核 0`，`A1 → 核 0` |
+| 核 1 读 B1，需要安装在私有缓存 | `A1`、`B1`，还空两路 | 换出最老的 `A0` 记录，留下 `A1 → 核 0`、`B1 → 核 1` |
+
+题设规定控制器必须完整跟踪这组的私有副本，且记录满后按 LRU 选旧项。在用新记录覆盖 A0 之前，它根据 A0 的旧记录向核 0 发失效，并等确认。若 A0 已修改，还须先交接最新数据。这样才不会留下控制器已经找不到的副本。B1 填入 LLC 时用的是空路，牺牲的是另一张表里的记录。换一种设计，如果控制器另有广播探测路径，过滤器缺项时也可以用保守的探测弥补，实际约束由一致性协议决定。
+
+Intel 第一代 Xeon Scalable 的事件表提供了 `UNC_CHA_SF_EVICTION`，并区分被替换的记录原先跟踪 M、E 还是 S 状态的行。该事件反映的是为了容纳新记录而发生的过滤器容量替换。核心自己腾出私有缓存位置，从而释放一条跟踪记录，不属于这项计数。因而，即使观察到此计数上升，也还要另外查看 LLC 数据替换和私有层未命中。事件表没有给出上面例题那样的索引或槽数。
+
+::: details 练习｜跟踪 A0 的记录提前释放
+
+核 1 读 B1 前，先让核 0 自己换出干净的 A0，并且让控制器在 B1 到达前收到通知并移除 A0 的记录。B1 仍读同一个地址，安装时还要撤销别的私有副本吗？
+
+过滤器现在只用了一项，B1 可用空项。LLC 中也仍有空路，两个结构都无需选牺牲项。若改成 LLC 已满、过滤器仍有空项，则这次只需处理数据阵列的替换。能否保留被替换块的私有副本，要回到该设计的包含性和探测规则判断。
+:::
+
 ### 用代码复算请求最后在哪一级取数
 
 这段 C 程序用 `private_copy[core][block]` 记录每个核手里有哪些块，用 `llc` 保存每组的块号，最久未使用的块排在最前。`read_block` 先查私有缓存，命中时直接返回，LLC 的顺序保持原样。到达 LLC 后，命中就把该块移到队尾，需要替换就从队首移走一块。在包含式模型里，移除队首还会清除对应的私有副本。这里把发失效到收齐确认合并成一步，两种情况都只模拟干净行，不计在途延迟。
@@ -258,6 +280,7 @@ only B0 and B1: L2=0 LLC requests=3 LLC hits=0 lower=3
 
 - [Marjan Fariborz，gem5 Bootcamp《Cache Systems》第 14 页](https://gem5bootcamp.github.io/gem5-bootcamp-env/assets/slides/using-gem5-04-gem5-caches-tutorial.pdf#page=14) · [CC BY 4.0 许可](https://github.com/gem5bootcamp/gem5-bootcamp-env/blob/51590ae00b0e451c9b6a8854addbb94128ab4cac/LICENSE) · 本文复用已裁出的图并以灰度显示。
 - [Intel 第一代 Xeon Scalable 技术综述，缓存层次与数据放置](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-xeon-processor-scalable-family-technical-overview.html)
+- [Intel Skylake Server Uncore 事件表，CHA 探测过滤器容量替换计数](https://perfmon-events.intel.com/platforms/skylakex/uncore-events/uncore/)
 - [Sorin、Hill、Wood，缓存一致性教材，包含式 LLC 与失效请求](https://pages.cs.wisc.edu/~markhill/papers/primer2020_2nd_edition.pdf)
 - [gem5 v24.1.0.3，Ruby 共享 L2 的 `MT`、`MT_I` 和 `M_I` 转换](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/ruby/protocol/MESI_Two_Level-L2cache.sm)
 - [gem5 v24.1.0.3 Ruby 的 L2 换出与失效确认状态机](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/ruby/protocol/MESI_Two_Level-L2cache.sm)
