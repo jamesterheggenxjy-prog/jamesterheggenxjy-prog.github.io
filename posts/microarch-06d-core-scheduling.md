@@ -275,9 +275,30 @@ SMT4, charge per selected task: 1500 us
 
 ## 这项调度挡住的是哪一种共享 {#core-boundary}
 
-核心调度直接改变的是任务的**同核并行关系**。一次切换后，各逻辑 CPU 还要落实本轮的选择。Linux 可能通过核间中断通知同核另一侧重新调度。文档还讨论了通知处理延迟和内核代码执行时的保护范围。例题的区间代表选定的调度结果，区间边界没有计入这些过渡耗时。
+核心调度直接改变的是任务的**同核并行关系**。前面的区间按两侧都落实选中结果后的状态计算。到了切换边界，还要分开记录调度器选中的任务和每一侧正在执行的代码。
 
 如果两个任务在同一逻辑 CPU 上先后运行，还需要分析先前状态能否影响下一段执行。比如[间接分支预测屏障](./microarch-04c-variants.md#variant-switch)对应执行顺序中的前后两段。如果它们位于不同核心但共用 LLC，仍需考虑[组内替换和分配范围](./microarch-06c-cat.md#cat-ways)。区分这三种情形，可以先写下两个任务的物理位置和时间关系，再找对应的控制。
+
+### 选好新配对以后，旧任务什么时候停下 {#core-ipi-handoff}
+
+仍用 CPU 0 和 CPU 4。起初 CPU 0 空闲，CPU 4 正运行 B0 的用户代码。现在 A0 在 CPU 0 上变为就绪，CPU 0 先进入调度器。按前面给出的排名，A0 高于 B0，本轮使用 α。CPU 4 的队列只有 β 组的 B0，因此为 CPU 4 选中的任务变成 idle。
+
+Linux v6.12 会检查 CPU 4 保存的 `core_pick` 和当前的 `curr`。此时两者分别是 idle 和 B0，调度器通过 `resched_curr` 请求另一侧重新调度。若另一侧需要核间中断（IPI）来接到通知，发出 IPI 之后，本侧可以继续切换。内核文档明确说明这一路径没有等待对方切入 idle 的确认。
+
+| 事件 | CPU 0 正在执行什么 | CPU 4 正在执行什么 |
+| --- | --- | --- |
+| 算出 A0 与 idle 的新配对 | 调度器代码 | B0 的用户代码 |
+| CPU 4 收到 IPI，进入中断处理 | 可能仍在切换，也可能已开始运行 A0 | 内核代码，B0 的用户代码已中断 |
+| CPU 4 采用 idle | 本轮新任务 A0 | 空闲任务，B0 仍可运行但未被选中 |
+
+要判定两个用户任务有无重叠，应比较 **A0 首次开始执行用户代码**与 **B0 停止执行用户代码**的时刻。例如在同一时钟上，若 A0 在第 6 μs 进入用户态，CPU 4 到第 9 μs 才因 IPI 离开 B0 的用户代码，那么题设中两段用户执行重叠了 3 μs。这个计算只说明给定时序的结果。Linux 文档指出某些体系结构可能出现接收延迟，并记载其讨论中未在 x86 上观察到这种情况。例题的时间为假设值。
+
+::: details 练习｜中断已处理，切换还没有完成
+
+保持 A0 在第 6 μs 进入用户态，改为 CPU 4 在第 4 μs 离开 B0 的用户代码，在第 10 μs 才切进 idle。两段用户代码是否重叠？
+
+两段用户代码没有重叠。B0 在 A0 开始之前 2 μs 就停止执行用户代码。第 6 到第 10 μs，两侧仍可同时执行，CPU 4 这时运行的是内核代码。只拿进入 idle 的第 10 μs 计算，会把这一段误算成两个用户任务并行。
+:::
 
 ### 同组任务进入内核时，另一侧在做什么 {#core-kernel-context}
 
@@ -324,6 +345,7 @@ Linux v6.12 文档把 IRQ、系统调用和 VMEXIT 列为这项调度的保护�
 - [Sims Hill Osborne、James H. Anderson，Simultaneous Multithreading and Hard Real Time: Can It Be Safe?，图 2](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ECRTS.2020.14) · [CC BY 3.0 许可](https://creativecommons.org/licenses/by/3.0/) · 本文裁出原图和图例。
 - [Linux v6.12 核心调度文档，cookie、任务挑选与强制空闲](https://docs.kernel.org/6.12/admin-guide/hw-vuln/core-scheduling.html)
 - [Linux v6.12 调度源码，同核逻辑 CPU 的联合选择](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/core.c#L5778-L5834)
+- [Linux v6.12 调度源码，比较各侧的当前任务并请求重新调度](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/core.c#L5836-L5896)
 - [Linux v6.12 核心调度的强制空闲归账](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/core_sched.c#L223-L270)
 - [Linux v6.12 将归账时间累加到任务统计](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/cputime.c#L216-L228)
 - [Linux 的 CPU 拓扑接口定义](https://github.com/torvalds/linux/blob/v6.12/Documentation/ABI/testing/sysfs-devices-system-cpu)
