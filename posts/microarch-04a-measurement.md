@@ -181,6 +181,25 @@ perf stat -e '{cycles:u,instructions:u}' -- ./array_sum shuffle
 
 初始化做了相同的工作，但它建立了内存映射和缓存初态，且开销仍包含在两次运行中。若问题转成「已经开始求和后，每一轮稳定用多久」，应另选只覆盖重复循环的窗口，或按轮次检查前几轮与后续轮次。即使运行 24 轮，也不能从总量倒推出初始化和求和各占多少。某些虚拟机或系统配置会让硬件事件不可用，读结果时应先确认工具报告的事件确有计数。
 
+### 墙钟耗时变长，线程多用了多少周期 {#pmu-scheduled-time}
+
+设同一个求和线程完成固定工作，频率恒为 2 GHz，事件组以 `pid=0, cpu=-1` 跟踪调用线程，并且只数用户态事件。题设忽略系统调用开销，事件组在线程运行期间始终可以计数。第一次线程连续运行 8 ms。第二次在运行 3 ms 后被调度器切走，等待 5 ms 后继续运行剩下的 5 ms。假定两次都退休 2400 万条指令，恢复后缓存状态也与连续运行时相同。
+
+| 观测量 | 连续运行 | 中途等待 |
+| --- | ---: | ---: |
+| 窗口两端的墙钟差 | 8 ms | 13 ms |
+| 线程实际运行时间 | 8 ms | 8 ms |
+| 该线程的用户态核心周期 | 1600 万 | 1600 万 |
+| 同一事件组内的 IPC | 1.5 | 1.5 |
+
+周期由运行的 8 ms 乘频率得到。第二次多出的 5 ms 内，CPU 可以运行其他线程，但这些周期不会计入这个按线程配置的事件组。于是一次完整求和需要等更久，两个 PMU 读数却保持相同。反过来，实测发现「墙钟变长、周期没变」只能把调度等待列为一种解释。要确认这 5 ms 在哪里，应对照线程 CPU 时间以及切入、切出时间戳。在 Linux 上可以分别读 `CLOCK_THREAD_CPUTIME_ID` 和 `CLOCK_MONOTONIC`，得到线程 CPU 时间和墙钟跨度，再结合事件的用户态过滤条件解释差额。
+
+::: details 练习｜恢复运行后还要重新取数据
+保留 5 ms 的调度等待。假定线程恢复后由于缓存状态变化，额外花 1 ms 在用户态执行，退休指令数仍为 2400 万。各读数会怎样变化？
+
+墙钟耗时增至 14 ms，线程运行 9 ms，核心周期增至 1800 万，IPC 降至约 1.33。真实测量若出现这样的读数组合，还需要缓存事件或其他对照才能把额外的 200 万周期归因给缓存。对一段实际的强制空闲时间，也可以沿[同核调度的吞吐和等待例题](./microarch-06d-core-scheduling.md#core-throughput)分别计算等待与执行。
+:::
+
 ## 从事件选择到 PMU 计数 {#pmu-path}
 
 **PMU** 是处理器的性能监控单元。以 Intel 的架构性能监控为例，核心内部产生退休、周期和访存等事件；硬件按配置选择哪些事件能使计数器累加。Linux 把不同机器上的事件描述组织成可供 `perf` 使用的接口。
@@ -485,6 +504,7 @@ gcc -O2 -fno-tree-vectorize -fno-lto -DWINDOW_PMU \
 - [Intel 软件开发者手册第 3 卷，性能监控](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 - [Linux 性能事件权限](https://docs.kernel.org/admin-guide/perf-security.html)
 - [Linux perf_event_open](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)
+- [Linux clock_gettime，单调时钟和线程 CPU 时间](https://man7.org/linux/man-pages/man3/clock_gettime.3.html)
 - [Linux perf stat 的计数和计时选项](https://man7.org/linux/man-pages/man1/perf-stat.1.html)
 - [Linux perf list 的事件分组与可用事件](https://man7.org/linux/man-pages/man1/perf-list.1.html)
 
