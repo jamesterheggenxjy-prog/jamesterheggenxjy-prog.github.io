@@ -20,13 +20,18 @@ bookTitle: 微架构安全
 
 ### 第一章　访存局部性与高速缓存
 
+跟踪一笔读写时，可以先从地址算出缓存组和行内偏移。若标记查找没有可用的副本，就继续看 MSHR 怎样记录这笔请求及其需要的读写权限。若目标行刚被换出，还要确认它的新数据是否仍在写缓冲中。下面的三个例题分别练习这一条路径上的三个判断。
+
 先从字节地址算出缓存块，再用复用距离判断为什么同一组数据换个顺序就会多出未命中。随后用同一串地址比较 LRU 与 FIFO，追踪未命中请求和写回。学完单核缓存后，再用一条由两核共享的缓存行推导写权限、失效确认和最新数据的去向。最后把两个计数器放在同一行和不同的行，在两个物理核上比较开销，并学习怎样定位引起伪共享的字段。
 
 1. [缓存行与局部性](./microarch-01-cache.md)
 2. [缓存怎样查找和替换一行](./microarch-01b-cache-mapping.md)
+   - [同一份数据有两个虚拟地址时，写入改了哪一行](./microarch-01b-cache-mapping.html#cache-vipt-alias-store){target=_self}
 3. [矩阵按行读和按列读的缓存开销](./microarch-01d-cache-traversal.md)
 4. [缓存未命中后如何合并请求](./microarch-01a-mshr.md)
+   - [取得写权限后，哪些字节真正变了](./microarch-01a-mshr.html#mshr-write-byte-trace){target=_self}
 5. [写入缓存后，数据什么时候送到下一级](./microarch-01e-cache-stores.md)
+   - [写回被拒绝后，同一行的读取要等到哪一步](./microarch-01e-cache-stores.html#write-back-retry){target=_self}
 6. [缓存一致性：两个核怎样读到最新值](./microarch-01f-coherence.md)
    - [生产者怎样用就绪标志发布数据](./microarch-01f-coherence.html#coherence-release-acquire){target=_self}
    - [怎样证明栅栏排除了两个旧值](./microarch-01f-coherence.html#coherence-fence-order){target=_self}
