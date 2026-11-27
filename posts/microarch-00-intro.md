@@ -49,6 +49,9 @@ bookTitle: 微架构安全
 1. [硬件预取器怎样工作](./microarch-02-prefetch.md)
    - [两个请求者执行同一条加载时怎样选表](./microarch-02-prefetch.html#prefetch-requestor-tables){target=_self}
 2. [预取器和数据缓存怎样握手](./microarch-02d-prefetch-rtl.md)
+   - [核心请求重试时，步长器在哪一拍看到地址](./microarch-02d-prefetch-rtl.html#rtl-snoop-retry){target=_self}
+   - [逐拍跟踪一条被拒绝的请求](./microarch-02d-prefetch-rtl.html#rtl-trace){target=_self}
+   - [P 重试时，核心恰好又有请求](./microarch-02d-prefetch-rtl.html#rtl-retry-priority){target=_self}
 
 ### 第三章　地址翻译
 
@@ -72,6 +75,10 @@ bookTitle: 微架构安全
 让两种访问顺序走同一个求和循环，先分别量程序整体和求和区间，再核对 PMU 记录的事件与实际计数时长。随后把客户端耗时与服务端记录对照，判断差异出现在排队、索引还是其他阶段，并说明给定观察者实际看到了什么。
 
 1. [用计时和计数器分析访存](./microarch-04a-measurement.md)
+   - [分两段读取时，先取差值再换算](./microarch-04a-measurement.html#pmu-delta){target=_self}
+   - [两个事件一起计数，能代表整段执行吗](./microarch-04a-measurement.html#pmu-group-window){target=_self}
+   - [为什么样本会落在加法指令上](./microarch-04a-measurement.html#pmu-sampling-skid){target=_self}
+   - [同样四次未命中，为什么有时只等一轮](./microarch-04a-measurement.html#pmu-miss-overlap){target=_self}
 2. [时间差何时算作侧信道证据](./microarch-04b-observation.md)
 
 ### 第六章　共享资源与隔离
