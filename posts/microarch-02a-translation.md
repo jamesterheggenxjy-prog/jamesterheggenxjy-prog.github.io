@@ -822,6 +822,133 @@ deny data read: G=12 VS=3 fault GPA=0x1235e8 htval=0x48d7a
 
 第三行只完成两次 VS 表项读取，因为第三项对应的 GPA 在 G 阶段就失败了。第四行已经完成全部 15 次表项读取，最后一次 G 权限检查仍能阻止实际数据加载。程序打印的是翻译地址和题设有地址报告时的 `htval`，并未模拟取数和异常交付的周期。
 
+## 设备怎样用 IOMMU 翻译 DMA 地址 {#iommu-device-translation}
+
+网卡发送数据时，驱动把缓冲区地址写进发送描述符，网卡随后自行发出读请求。这种由设备直接访问内存的方式叫 DMA（Direct Memory Access，直接内存访问）。请求到达 I/O 内存管理单元（IOMMU）时，关键输入是**请求来自哪个设备、访问哪个地址、要读还是要写**。IOMMU 先按设备身份选择翻译上下文，再查该上下文的页表。设备在描述符里使用的地址，在本例中称为 IOVA（I/O Virtual Address，I/O 虚拟地址）。
+
+在 Linux 驱动里，`dma_map_single(dev, buf, len, DMA_TO_DEVICE)` 接收 CPU 可用的缓冲区指针 `buf`，返回应交给设备的 DMA 地址。驱动先用 `dma_mapping_error()` 检查结果，再把返回的地址写进设备描述符。CPU 访问缓冲区时沿自己的页表走到物理页，网卡则用描述符中的 DMA 地址走 I/O 翻译，最后两路会合到同一缓冲区。发送场景中的 `DMA_TO_DEVICE` 表示数据从内存传给设备，故设备对缓冲区执行的是读。等设备完成后，驱动才用相同的长度和方向解除映射。这里用 IOMMU 实现 DMA 映射，具体平台也可以采用别的实现。
+
+### 先查设备目录，再沿页表走三层
+
+以 RISC-V IOMMU 规范 `20250620` 为准。题设中，设备发出普通的未翻译读写请求，不带进程号；设备由宿主管理。`ddtp` 寄存器给出设备目录表（DDT）的根页号和层数。设目录只有一层，根页物理基址为 `0x80000000`，使用 32 字节的基础格式。这样一页能放 128 个设备上下文。设备号的低七位选一个槽，未使用的高位须为零。设备 A 的 `device_id = 0x12`，所以设备上下文地址为 `0x80000000 + 0x12 × 32 = 0x80000240`。设备 B 的 `device_id = 0x23`，上下文地址为 `0x80000460`。在此之前，IOMMU 还没有用 IOVA 给页表计算索引。
+
+<figure style="margin:1.2rem 0">
+<a href="/microarch/riscv-iommu-base-device-context.svg"><img src="/microarch/riscv-iommu-base-device-context.svg" alt="RISC-V IOMMU 基础设备上下文的四个 64 位字，依次为 tc、iohgatp、ta、fsc" width="1024" height="256" loading="lazy" decoding="async" style="background:#fff"></a>
+<figcaption>图 4　RISC-V IOMMU 规范的基础设备上下文。图中每行是一个 64 位字，从上到下对应上下文内的字节偏移 0、8、16、24。点击可查看原尺寸。</figcaption>
+</figure>
+
+| 字段 | 这笔请求怎样使用它 |
+| --- | --- |
+| `tc` | `V` 确认上下文有效。`PDTV=0` 表示第一阶段的配置直接从当前上下文取得。 |
+| `iohgatp` | 选择第二阶段翻译方案和根页。题设为 `Bare`，第一阶段的翻译结果直接用作系统物理地址。 |
+| `ta` | 保存软件分配的 `PSCID`，标识第一阶段地址空间，也用来限定翻译失效的范围。 |
+| `fsc` | 保存第一阶段的分页方案和根页号。题设使用 Sv39。 |
+
+支持多个进程地址空间的设备还可以提供 `process_id`。在启用进程目录表（PDT）的上下文中，先用 `device_id` 查到设备上下文，再按 `process_id` 查进程上下文，由后者提供第一阶段的页表配置。如果设备交给客户机，宿主还可以配置第二阶段。这时第一阶段页表位于客户机物理地址空间，对页表项的读取也经过第二阶段，原理与前面的[虚拟机两阶段例题](#sv39-two-stage)相同。下面的例题保留两套独立的宿主第一阶段页表，便于直接观察设备身份对结果的影响。
+
+两个设备都请求 IOVA `0x404035e8`，因此 Sv39 得到相同的三个索引 `1、2、3` 和页内偏移 `0x5e8`。每项 PTE 占 8 字节。A 的根表在 `0x81000000`，第一个 PTE 地址便是 `0x81000008`；它指向 `0x81001000`，所以第二个 PTE 在 `0x81001010`，最后查到 `0x81002018`。B 的索引完全相同，根表及后续页表却不同。
+
+| 设备 | `PSCID` | 依次读取的 PTE 地址 | 叶子的映射 | 读请求结果 | 写请求结果 |
+| --- | --- | --- | --- | --- | --- |
+| A | 7 | `0x81000008`、`0x81001010`、`0x81002018` | `0x40123000`，只读 | `0x401235e8` | 写入权限检查失败 |
+| B | 8 | `0x82000008`、`0x82001010`、`0x82002018` | `0x40567000`，可读写 | `0x405675e8` | `0x405675e8` |
+
+A 的叶子低位为 `0x53`，即 `V/R/U/A` 置位；B 的叶子为 `0xd7`，另有 `W/D`。两者都允许题设中没有监管者权限的设备读。A 收到写请求时，IOMMU 虽然读到了目标页号，却在 `W` 检查处停止。对于本例的未翻译请求，规范要求 IOMMU 让 I/O 桥终止有故障的事务；IOMMU 可经故障事件队列（FQ）通知系统软件。
+
+### 用 C 逐笔核对目录地址与 PTE 地址 {#iommu-device-model}
+
+这个模型把 PTE 内存写成六条地址和值的记录。设备上下文只保留例题用到的页表根。遍历仍按三个真实索引计算每次读取的地址，从 PTE 中提取下一级页号，并在末级检查权限。四笔测试都从目录开始，等价于题设中没有可用的缓存记录。代码只处理例题里的三层 Sv39 和 4 KiB 叶子。
+
+```c
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+enum { V = 1, R = 2, W = 4, X = 8, U = 16, A = 64, D = 128 };
+#define PTE(page, flags) (((UINT64_C(page) >> 12) << 10) | (flags))
+
+struct TableEntry { uint64_t address, value; };
+static const struct TableEntry ptes[] = {
+    {0x81000008, PTE(0x81001000, V)},
+    {0x81001010, PTE(0x81002000, V)},
+    {0x81002018, PTE(0x40123000, V | R | U | A)},
+    {0x82000008, PTE(0x82001000, V)},
+    {0x82001010, PTE(0x82002000, V)},
+    {0x82002018, PTE(0x40567000, V | R | W | U | A | D)},
+};
+
+static uint64_t read_pte(uint64_t address)
+{
+    printf(" 0x%08" PRIx64, address);
+    for (size_t i = 0; i < sizeof ptes / sizeof ptes[0]; ++i) {
+        if (ptes[i].address == address) return ptes[i].value;
+    }
+    return 0;
+}
+
+static void translate(unsigned device, bool write)
+{
+    static const uint64_t roots[128] = {
+        [0x12] = 0x81000000, [0x23] = 0x82000000,
+    };
+    const uint64_t iova = 0x404035e8;
+    uint64_t table = roots[device];
+    printf("dev=%02x %s DC=0x%08" PRIx64 " PTE:", device,
+           write ? "write" : "read", UINT64_C(0x80000000) + device * 32);
+
+    for (int level = 2; level >= 0; --level) {
+        const uint64_t index = (iova >> (12 + 9 * level)) & 0x1ff;
+        const uint64_t pte = read_pte(table + index * 8);
+        if (!(pte & V) || ((pte & W) && !(pte & R))) abort();
+
+        const uint64_t page = (pte >> 10) << 12;
+        if (pte & (R | X)) {
+            if (level != 0) abort();
+            const unsigned required = U | A | (write ? W | D : R);
+            if ((pte & required) == required) {
+                printf(" -> SPA=0x%08" PRIx64 "\n", page | (iova & 0xfff));
+            } else {
+                puts(" -> permission denied");
+            }
+            return;
+        }
+        table = page;
+    }
+    abort();
+}
+
+int main(void)
+{
+    translate(0x12, false);
+    translate(0x12, true);
+    translate(0x23, false);
+    translate(0x23, true);
+    return 0;
+}
+```
+
+```text
+dev=12 read DC=0x80000240 PTE: 0x81000008 0x81001010 0x81002018 -> SPA=0x401235e8
+dev=12 write DC=0x80000240 PTE: 0x81000008 0x81001010 0x81002018 -> permission denied
+dev=23 read DC=0x80000460 PTE: 0x82000008 0x82001010 0x82002018 -> SPA=0x405675e8
+dev=23 write DC=0x80000460 PTE: 0x82000008 0x82001010 0x82002018 -> SPA=0x405675e8
+```
+
+### 撤销映射以后，旧请求何时才算结束 {#iommu-invalidation}
+
+假设 B 发送完毕，系统要撤销 `PSCID=8` 的这个非全局映射，随后把物理页 `0x40567000` 交给另一个用途。页表中的有效位清除以后，下一次重新查表就会失败。但 IOMMU 的地址翻译缓存（IOATC）可能还保留旧的映射和写权限，因此系统还要在 IOMMU 的命令队列（CQ）提交 `IOTINVAL.VMA`。对本例可选 `GV=0`、`PSCV=1`、`AV=1`，范围限定在宿主的 `PSCID=8` 和含 `0x404035e8` 的 I/O 虚拟页。只改叶子项时，设备目录没有变；若修改的是设备上下文本身，则还要考虑面向设备目录缓存的 `IODIR.INVAL_DDT`。CPU 上的 `SFENCE.VMA` 用于 hart 的地址翻译同步，无法完成这里的 IOMMU 命令。
+
+软件写入命令并推进队尾之后，IOMMU 从队头读取命令。**看到队头越过失效命令，只能知道它已被取走。** 软件可以在随后排入 `IOFENCE.C`，等队头越过这个栅栏，确认之前的失效操作已经完成。即使如此，还要确认设备已经结束对缓冲区的访问。`IOFENCE.C` 的 `PR/PW` 所覆盖的是 IOMMU 已处理的读写，到达 IOMMU 之前仍在互连中飞行的请求，需要靠设备的完成协议或相应互连机制处理。页能安全复用，依赖旧访问已经结束和旧翻译已经退出使用这两个条件。DMA 缓冲区的数据缓存可见性则由平台的一致性能力和 DMA API 另行处理。
+
+::: details 练习｜只撤销 B 的映射，A 还能读吗
+
+系统只把 B 的叶子项置为无效，并完成上面限定在 `PSCID=8` 的同步。设备 A 再读 `0x404035e8` 时，从哪个物理地址读？B 再发出同一读请求会怎样？
+
+A 仍读 `0x401235e8`。它的上下文选择另一套页表，`PSCID=7` 也不在这次失效的范围里。B 若再发出同一请求，重新遍历会在 `0x82002018` 发现无效叶子，I/O 事务被终止。仅凭 IOVA 相同，无法知道另外一个设备的映射是否受影响。
+:::
+
 ## 参考文献
 
 - [RISC-V 特权规范，监管者内存管理栅栏与 ASID 回收](https://docs.riscv.org/reference/isa/priv/supervisor.html)
@@ -836,6 +963,9 @@ deny data read: G=12 VS=3 fault GPA=0x1235e8 htval=0x48d7a
 - 图 1 与图 3 来自 OpenHW CVA6 设计文档，本站补白底和留白并以灰度保存。[图与文档的源码版本](https://github.com/openhwfoundation/cva6/blob/742dc82a0c706e0a3bfb98b709fd3ee06d50d12a/docs/03_cva6_design/MMU.rst) · [对应源码库许可文本](/microarch/cva6-figure-license.txt)
 - [Linux 的页表、TLB 和遍历缓存](https://docs.kernel.org/mm/page_tables.html)
 - [Linux 内核对缓存与 TLB 同步接口的说明](https://docs.kernel.org/core-api/cachetlb.html)
+- [RISC-V International IOMMU 规范 v20250620，设备目录、设备上下文与翻译过程](https://docs.riscv.org/reference/iommu/v20250620/iommu_data_structures.html)。本文图 4 为该页图 7 原图，由 RISC-V International 发布，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。
+- [RISC-V International IOMMU 规范 v20250620，命令队列、翻译失效和完成栅栏](https://docs.riscv.org/reference/iommu/v20250620/iommu_in_memory_queues.html)
+- [Linux 6.12 内核文档，动态 DMA 映射与缓冲区生命周期](https://docs.kernel.org/6.12/core-api/dma-api-howto.html)
 
 <nav class="article-nav" aria-label="系列文章导航">
 
