@@ -24,11 +24,9 @@ bookTitle: 微架构安全
 
 ### 第一章　访存局部性与高速缓存
 
-跟踪一笔读写时，可以先从地址算出缓存组和行内偏移。若标记查找没有可用的副本，就继续看 MSHR 怎样记录这笔请求及其需要的读写权限。若目标行刚被换出，还要确认它的新数据是否仍在写缓冲中。下面的三个例题分别练习这一条路径上的三个判断。
+先沿字节地址算出缓存组、标记和行内偏移，再按访问次序判断哪些块会留到下一次读取。数组扫描先练习数块，矩阵例题再加上组相联的限制。读到两张矩阵时，要把同一循环中所有落到该组的块都计入。
 
-学习访问顺序时，先读数组扫描的例题，数一数第一遍结束时还留着哪几条行。再读矩阵分批的例题，判断同一块再次被访问前，有多少块与它竞争同一组。前一道题给定整个缓存只能保留两行，后一道题把限制放到一个八路缓存组里。两题都从当前的驻留状态出发，沿新的访问次序判断何时需要重新取行。
-
-先从字节地址算出缓存块，再用复用距离判断为什么同一组数据换个顺序就会多出未命中。随后用同一串地址比较 LRU 与 FIFO，追踪未命中请求和写回。学完单核缓存后，再用一条由两核共享的缓存行推导写权限、失效确认和最新数据的去向。最后把两个计数器放在同一行和不同的行，在两个物理核上比较开销，并学习怎样定位引起伪共享的字段。
+随后跟一笔未命中走到 MSHR，分别追踪读写权限、要取得的旧字节和随后写回的数据。两笔写能否合并，取决于发包前已经覆盖哪些字节，以及其间是否有读请求。学完单核路径，再把同一条行放进两个核的私有缓存，推导失效确认与最新数据的去向，最后用计数器例题定位伪共享的字段。
 
 1. [缓存行与局部性](./microarch-01-cache.md)
    - [一次加载跨过缓存行边界时](./microarch-01-cache.md#locality-cross-line)
@@ -42,6 +40,7 @@ bookTitle: 微架构安全
    - [把行跨度换成组号](./microarch-01d-cache-traversal.md#matrix-stride-sets)
    - [组号绕一圈要多少行](./microarch-01d-cache-traversal.md#matrix-set-period)
    - [不改矩阵布局，也能减少按列读取的未命中](./microarch-01d-cache-traversal.md#matrix-row-tiles)
+   - [同一个循环读两张矩阵，为什么每批只能留四行](./microarch-01d-cache-traversal.md#matrix-two-stream-tiles)
 4. [缓存未命中后如何合并请求](./microarch-01a-mshr.md)
    - [沿主例数一数槽位](./microarch-01a-mshr.md#mshr-capacity-trace)
    - [读请求发出后，同一行又来了写请求](./microarch-01a-mshr.md#mshr-read-then-write)
@@ -49,6 +48,7 @@ bookTitle: 微架构安全
    - [下一级拒收以后，重试还会发原来的包吗](./microarch-01a-mshr.md#mshr-send-retry)
    - [跨行加载的两部分可以各走一条路](./microarch-01a-mshr.md#mshr-split-load)
 5. [写入缓存后，数据什么时候送到下一级](./microarch-01e-cache-stores.md)
+   - [两笔局部写什么时候能省去整行读取](./microarch-01e-cache-stores.md#store-whole-line)
    - [写回被拒绝后，同一行的读取要等到哪一步](./microarch-01e-cache-stores.md#write-back-retry)
    - [被替换的行怎样重新组成写回地址](./microarch-01e-cache-stores.md#writeback-address)
    - [写缓冲报满时，已经在途的填充怎么办](./microarch-01e-cache-stores.md#write-back-reserve)
@@ -135,14 +135,16 @@ bookTitle: 微架构安全
 
 ### 第六章　共享资源与隔离
 
-把两个工作负载放在一起，先算末级缓存的组内替换怎样影响私有缓存，再沿内存控制器的读缓冲、拆包和重试走到 DRAM，计算行调度怎样改变返回时间。之后从控制组和缓存域查到 CAT 掩码，推导新块能填到哪里。最后从两个逻辑 CPU 的运行队列算出同核配对，看看有任务在排队时为何仍可能空闲。
+把两个工作负载放在一起，先查它们共用哪些结构。沿末级缓存的数据阵列和探测过滤器，分别判断哪个槽用尽、哪一份私有副本需要撤销。请求继续走到内存控制器时，再判断它是在等入队、等打开行，还是等通道切回读方向。之后从控制组和缓存域查 CAT 掩码，推导新块能填到哪里。最后从两个逻辑 CPU 的运行队列算出同核配对，看看有任务在排队时为何仍可能空闲。
 
 1. [不同的数据为什么会在末级缓存里互相挤掉](./microarch-06a-shared-cache.md)
    - [如果被换出的行在私有缓存里已经改过](./microarch-06a-shared-cache.md#llc-dirty-victim)
+   - [LLC 还有空路，为什么私有副本也可能被撤销](./microarch-06a-shared-cache.md#llc-snoop-filter)
    - [LLC 未命中是否等于 DRAM 读取？](./microarch-06a-shared-cache.md#llc-miss-source)
 2. [未命中次数相同，为什么内存等待更长](./microarch-06b-memory-queue.md)
    - [一个读包跨两个存储体，要等哪一半](./microarch-06b-memory-queue.md#memory-split-bank-response)
    - [两个存储体怎样共用一条数据总线](./microarch-06b-memory-queue.md#memory-bank-overlap)
+   - [写队列积满到什么程度，读请求要让路](./microarch-06b-memory-queue.md#memory-write-drain)
    - [刷新怎样打断一次本来会命中打开行的读取](./microarch-06b-memory-queue.md#memory-refresh)
    - [写队列覆盖了部分读包，还要发几次列读](./microarch-06b-memory-queue.md#memory-write-queue-read)
    - [写队列能满足一部分，入队检查为何仍可能失败](./microarch-06b-memory-queue.md#memory-forward-admission)
