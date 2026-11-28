@@ -611,6 +611,123 @@ Linux v6.12 的 RISC-V `riscv_flush_icache` 接口可以由内核处理线程所
 这一步保证的是数据层面的发布顺序。hart 1 仍要在看到新写入之后，完成一次本地指令同步，再进入这段代码。修改的是指令字时，要检查取指的同步。若还修改了页表中的执行权限或映射，则另外检查[地址翻译同步](./microarch-02a-translation.md#sv39-fence)。
 :::
 
+## 网卡收包后，CPU 何时能读到新数据 {#coherence-dma}
+
+收包驱动往往要处理两块共享内存。一块是**接收描述符**，其中有缓冲区的 DMA 地址、完成状态和包长。另一块是**数据缓冲区**，网卡把收到的字节写在这里。下面选一种常见的安排：描述符用 `dma_alloc_coherent()` 分配，数据缓冲区用 `dma_map_single(..., DMA_FROM_DEVICE)` 建立流式映射并反复使用。CPU 观察描述符来判断设备是否交还缓冲区，再用 CPU 指针访问数据。描述符和缓冲区各有自己的地址、缓存属性和访问顺序。
+
+### 同一物理行在两条访问路径上怎样变化
+
+用一个非一致 DMA 平台的模型。数据缓冲区映射到物理页 `0x40567000`，第一条缓存行占 `0x40567000` 到 `0x4056703f`。假定驱动已经建立映射，缓冲区暂时归设备使用。上轮留下的首字节是 `0x11`，本轮网卡要把它改为 `0x42`。设备通过 I/O 端发写事务，CPU 从自己的数据缓存加载。为突出差别，假定设备在写完数据后才在一致的描述符上发布完成，而 CPU 缓存仍可能有一个干净的旧副本，例如设备持有缓冲区期间由推测读入。设备没有使这个副本失效。
+
+| 时刻 | 一致描述符 | CPU 缓存中该行 | 设备可见的内存中首字节 |
+| --- | --- | --- | --- |
+| 本轮数据到达前 | 设备持有 | `0x11`，干净 | `0x11` |
+| 网卡写入包数据 | 设备持有 | `0x11`，干净 | `0x42` |
+| 网卡发布完成 | CPU 可以接手 | `0x11`，干净 | `0x42` |
+| 驱动完成面向 CPU 的 DMA 同步 | CPU 持有 | 旧行已失效 | `0x42` |
+| CPU 加载缓冲区 | CPU 持有 | 重新取得 `0x42` | `0x42` |
+
+第三行解释了为什么描述符已经显示完成，直接读数据仍可能看到旧值。答题时要指出两块不同的内存，以及缓存中哪一条行仍有效。在参与一致性的 I/O 路径上，设备写入可以通过一致性互连使 CPU 的旧副本失效，或由平台采取其他方式维持可见性。在非一致路径上，DMA 同步由平台实现所需的缓存维护或数据复制。对本题的干净旧行，失效后重新读取就足够。设备读取 CPU 写过的发送缓冲区时，问题反过来：如果最新值还在 CPU 的脏行里，要在交给设备前使最新值到达设备可见的位置。
+
+缓存维护的最小单位也是本例的陷阱。假定同一条 64 字节行的前 32 字节给设备收包，后 32 字节让 CPU 同时更新另一个对象。如果 CPU 保留一条脏行，写回整行可能把设备刚写入的前半段覆盖；如果直接丢弃整条脏行，后半段 CPU 的修改又可能丢失。两个对象虽然字节范围不重叠，交接时仍会互相影响。因此流式 DMA 区域要使用适合 DMA 的缓冲区，并让每次独立交接的区域避免与其他活跃对象共用边界缓存行。
+
+### 描述符的顺序与缓冲区的交接
+
+下面是 Linux 驱动接收路径的核心片段。题设的设备协议保证 `RX_CPU` 在数据和包长写出后才发布，同一个接收槽始终由一个 CPU 轮询。`slot->desc` 指向一致描述符，`slot->dma` 和 `slot->capacity` 来自初始化时检查成功的流式映射。`consume_packet()` 在返回前完成读取，不保留缓冲区指针；`RX_NOTIFY` 是题设设备的门铃值。
+
+```c
+static bool poll_slot(struct device *dev, struct rx_slot *slot,
+                      void __iomem *doorbell)
+{
+    struct rx_desc *desc = slot->desc;
+
+    if (le32_to_cpu(READ_ONCE(desc->owner)) != RX_CPU)
+        return false;
+
+    dma_rmb();
+    unsigned int len = le32_to_cpu(READ_ONCE(desc->packet_len));
+    if (len > 0 && len <= slot->capacity) {
+        dma_sync_single_for_cpu(dev, slot->dma, slot->capacity,
+                                DMA_FROM_DEVICE);
+        consume_packet(slot->buf, len);
+        dma_sync_single_for_device(dev, slot->dma, slot->capacity,
+                                   DMA_FROM_DEVICE);
+    }
+
+    WRITE_ONCE(desc->packet_len, cpu_to_le32(0));
+    dma_wmb();
+    WRITE_ONCE(desc->owner, cpu_to_le32(RX_DEVICE));
+    writel(RX_NOTIFY, doorbell);
+    return true;
+}
+```
+
+`dma_rmb()` 排定 CPU 的观察顺序：先确认设备交还了描述符，再读取设备写的包长。它依赖设备按协议发布完成，单靠 CPU 栅栏无法补救设备提前报告。`dma_sync_single_for_cpu()` 对应表中的数据缓冲区交接，驱动在它之后才碰包数据。循环复用时，驱动结束 CPU 访问后再走面向设备的同步，然后重填描述符，并用 `dma_wmb()` 把字段更新排在交出所有权之前。描述符状态在一致内存里，门铃在 MMIO 中，门铃的顺序要看 `writel()` 等 I/O 接口的保证。异常包长的分支跳过 CPU 对缓冲区的访问，因此这轮只处理描述符。驱动卸载或释放缓冲区时，还要确保设备停止访问，再解除流式映射。
+
+### 用 C 复算何时会读到上一包
+
+下面把物理行简化成其中一个字节。`read_cpu()` 在缓存有效时使用缓存的值，否则重新取数。程序依次比较直接读、完成后同步，以及过早同步并读取。它只复算上面的缓存状态，函数调用顺序由题设给定。
+
+```c
+#include <stdbool.h>
+#include <stdio.h>
+
+struct Line {
+    unsigned memory;
+    unsigned cached;
+    bool valid;
+};
+
+static unsigned read_cpu(struct Line *line)
+{
+    if (!line->valid) {
+        line->cached = line->memory;
+        line->valid = true;
+    }
+    return line->cached;
+}
+
+static void sync_for_cpu(struct Line *line)
+{
+    line->valid = false;
+}
+
+int main(void)
+{
+    struct Line direct = {0x11, 0x11, true};
+    struct Line ordered = direct;
+    struct Line early = direct;
+
+    direct.memory = 0x42;
+    printf("complete, no sync:     0x%02x\n", read_cpu(&direct));
+
+    ordered.memory = 0x42;
+    sync_for_cpu(&ordered);
+    printf("complete, then sync:   0x%02x\n", read_cpu(&ordered));
+
+    sync_for_cpu(&early);
+    (void)read_cpu(&early);
+    early.memory = 0x42;
+    printf("sync and read early:   0x%02x\n", read_cpu(&early));
+    return 0;
+}
+```
+
+```text
+complete, no sync:     0x11
+complete, then sync:   0x42
+sync and read early:   0x11
+```
+
+第三行里，第一次 CPU 读取发生在设备写入之前，把 `0x11` 又装回了缓存。设备后来写入 `0x42`，仍没有使它失效。这个分支说明同步调用放在哪里很重要。诊断真实驱动时，先查三件事：设备拿到的地址是否经 [IOMMU](./microarch-02a-translation.md#iommu-device-translation) 指向正确页面，设备是否已经完成本轮写入，以及 CPU 的后续读取是否从正确副本取数。改变任一个条件，都可能让 CPU 看不到本轮收到的数据。
+
+::: details 练习｜把描述符和缓冲区都改成一致分配
+
+假定网卡仍按原顺序写数据并交还描述符，且数据缓冲区也改为 `dma_alloc_coherent()` 分配。哪一步可以去掉，哪一步仍有关？
+
+数据缓冲区可直接依靠一致映射的可见性保证，因此不再使用流式映射的 `dma_sync_single_for_cpu()` 和 `dma_sync_single_for_device()`。观察所有权后再读包长和数据的顺序依然有约束，所以仍需按设备协议使用 `dma_rmb()`。设备也必须先写完数据，再交还所有权。
+:::
+
 ## 一致性为什么与微架构安全有关 {#coherence-security}
 
 一致性机制的首要职责是保持程序读写正确，但跨核交接会改变访问延迟和缓存状态。共享内存的 Flush+Reload 例子可以沿同一行理解：观察者先清除候选行；被观察代码随后读取该共享物理行；观察者再测量自己的加载。若这次加载明显更快，说明在测量前有活动使该行重新变得容易取得。缓存一致性让跨核共享的副本和失效能够正确交接，也让访问活动可能留下观察差异。一次快速命中只能支持“行处于某种较近状态”，不能单独证明是谁访问、何时访问，或访问时寄存器里的值是什么。
@@ -633,6 +750,9 @@ Prime+Probe 观察的是另一种现象。观察者先占用一组缓存位置�
 - [RISC-V 的 RVWMO 内存顺序模型](https://docs.riscv.org/reference/isa/unpriv/rvwmo.html)
 - [RISC-V Zifencei，数据存储和后续取指的同步](https://docs.riscv.org/reference/isa/unpriv/zifencei.html)
 - [Linux v6.12 RISC-V 指令缓存同步的系统调用入口](https://github.com/torvalds/linux/blob/v6.12/arch/riscv/kernel/sys_riscv.c) · [按地址空间分派](https://github.com/torvalds/linux/blob/v6.12/arch/riscv/mm/cacheflush.c) · [切入时补做同步](https://github.com/torvalds/linux/blob/v6.12/arch/riscv/mm/context.c)
+- [Linux 6.12 动态 DMA 映射指南，收包缓冲区的流式映射与重复使用](https://docs.kernel.org/6.12/core-api/dma-api-howto.html)
+- [Linux 6.12 DMA API，一致内存、方向和边界对齐](https://docs.kernel.org/6.12/core-api/dma-api.html)
+- [Linux 6.12 内存屏障文档，DMA 描述符所有权和 MMIO 门铃](https://docs.kernel.org/6.12/core-api/wrappers/memory-barriers.html)
 
 <nav class="article-nav" aria-label="系列文章导航">
 
