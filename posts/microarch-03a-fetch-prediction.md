@@ -250,6 +250,37 @@ BOOM v3 的固定版本中，FTQ 记录取指组看到的栈顶值 `ras_top` 和
 C 仍回 `0x3405`，因为它由 B 在 `0x3400` 调用。B 改回 `0x2605`，因为 A 的下一条指令地址变了。即使两条 `RET` 的位置完全相同，只凭返回指令自身的地址也推不出这两次目标。
 :::
 
+### RSB 填充和影子栈分别管哪一步 {#predict-rsb-protection}
+
+仍以 B 在 `0x3405` 执行的 `RET` 为例。前端拿到预测地址后就可以取指，后端还要从 `RSP = 0x7ff8` 所指的程序栈中读出真正的返回地址 `0x2205`。这个先后关系提出了两个不同的问题。前端暂时依据哪个地址取指？等到返回指令执行时，程序栈给出的地址是否允许用于返回？前一个问题涉及 RSB 和备用间接预测器，后一个问题可以交给 CET 影子栈检查。
+
+#### RSB 填充改变的是前端的候选地址
+
+设 B 所在的任务在返回前被换下。稍后任务恢复时，操作系统会恢复它的程序栈指针，但返回预测用的槽能否继续沿用，取决于处理器和系统在切换边界采取的措施。**RSB 填充**（RSB stuffing）让受信任的软件在相应边界把预测槽改写为预先选定的目标。这样，后续 `RET` 若使用这些槽，前端读到的是系统选定的候选地址。等 B 读到程序栈中的 `0x2205`，如果预测不同，仍按普通误预测处理，撤销错误路径并改向。填充没有改写 B 保存在内存中的返回地址。
+
+读内核文档时要分清边界。任务切换讨论的是同一逻辑处理器先后运行不同任务。虚拟机退出（VM exit）讨论的是同一逻辑处理器从客户机回到宿主虚拟机监控器。Linux 会按处理器能力和启用的缓解策略，在相应边界使用填充、预测屏障或专门的退出序列。例如，受 PBRSB 影响的部分 Intel 处理器即使启用了 eIBRS，仍需在虚拟机退出处额外处理首次不匹配的返回。Linux 的 `spectre_v2` 状态文件位于 `/sys/devices/system/cpu/vulnerabilities/spectre_v2`。报告中的 `RSB filling` 对应任务切换保护，`PBRSB-eIBRS: SW sequence` 对应受影响处理器上的虚拟机退出保护。两段状态回答的是不同的问题。
+
+填充只提供有限个候选项。假定某个教学栈填充后有两项可用，之后连续三次返回，中途没有调用补充。前两次可取到填充项，第三次可能下溢。对具有 RSBA 行为的部分 Intel 处理器，下溢时近返回可以转用备用间接目标预测。Intel 版 Retbleed 涉及的正是这条路径。分析系统覆盖范围时，需要分别问栈中是否还有可用项，以及下溢时备用预测允许使用哪个预测域的记录。在支持 `RRSBA_DIS_S` 的相应 Intel 处理器上，系统还可以用它禁止特权模式下的这条备用路径。Linux 文档另把 AMD 版 Retbleed 归入分支类型混淆，阅读时不能把 Intel 的下溢条件套到 AMD 上。
+
+#### CET 影子栈检查的是返回指令要使用的地址
+
+CET（Control-flow Enforcement Technology，控制流强制技术）启用影子栈后，近 `CALL` 会将返回地址分别记录到程序栈和独立的影子栈。程序栈由 `RSP` 定位，影子栈由 `SSP` 定位，普通数据写入不能直接修改受保护的影子栈页。近 `RET` 读取两份地址并比较。以 B 的返回为例，假定此时 `SSP = 0x9ff8`，影子栈顶仍是 A 调用 B 时记录的 `0x2205`。三种情形可逐项推导。
+
+| 前端候选地址 | `RSP` 所指地址中的值 | `SSP` 所指地址中的值 | 执行 `RET` 的结果 |
+| --- | --- | --- | --- |
+| `0x2205` | `0x2205` | `0x2205` | 两栈匹配，返回 `0x2205`，预测正确 |
+| `0x2605` | `0x2205` | `0x2205` | 两栈匹配，返回 `0x2205`，前端需要纠错 |
+| `0x2205` | `0x2605` | `0x2205` | 两栈失配，产生控制保护异常 `#CP` |
+
+第二行和第三行各自只改了一个输入。第二行改的是前端预测，执行时两份返回地址依旧一致。第三行改的是普通栈内容，即使预测命中影子栈中的地址，`RET` 依然不能通过检查。这里描述的是可见的返回或异常结果。Intel 还为影子栈规定了更具体的推测限制：当栈中读出的目标与预测目标不同，并且两份栈值不匹配或可能仍是瞬态值时，处理器会限制在**读出的目标**处执行。判断这条保证时，先分清所说的地址是前端已经预测的候选，还是后来从内存读出的目标。
+
+::: details 练习｜两个缓解设置分别处理哪一列
+
+假定进程的 Linux 状态文件 `/proc/<PID>/status` 中，`x86_Thread_features` 一行包含 `shstk`，而系统的 `spectre_v2` 报告包含 `RSB filling`。哪项设置管上表第三行，哪项设置管任务切换后使用的预测槽？
+
+`shstk` 表示该线程启用了影子栈，对应第三行的两份地址校验。`RSB filling` 表示内核报告启用了任务切换时的 RSB 填充，它影响的是前端候选地址的来源。若要判断虚拟机退出的保护，还要查该边界的处理器能力和内核状态。
+:::
+
 ## GHR 怎样让同一条分支查到不同表项 {#predict-ghr}
 
 设一条较早的分支先区分两种记录格式，较晚的公共代码再判断其中的可选字段。假如一种格式通常带这个字段，前一条分支的方向就能帮助预测后一条。只将后一条分支的所有执行汇入一个计数器，会把两类输入的结果混在一起。
@@ -649,6 +680,9 @@ Intel 对使用 eIBRS（增强间接分支受限推测）或在切换后使用 I
 - [BOOM 快速预测器与 BTB、BIM、RAS](https://docs.boom-core.org/en/latest/sections/branch-prediction/nl-predictor.html)
 - [Intel 推测执行技术文档，近调用、近返回与 RSB](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/hardware-behavior-related-to-speculative-execution.html)
 - [Intel 对 RSB 下溢及备用预测行为的说明](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/advisory-guidance/return-stack-buffer-underflow.html)
+- [Linux 内核文档，RSB 相关缓解与处理器差异](https://docs.kernel.org/admin-guide/hw-vuln/rsb.html)
+- [Linux 内核文档，Spectre 状态报告中的 RSB 与 PBRSB 字段](https://docs.kernel.org/6.9/admin-guide/hw-vuln/spectre.html#spectre-system-information)
+- [Linux 6.12 内核文档，CET 影子栈与线程状态](https://docs.kernel.org/6.12/arch/x86/shstk.html)
 - [BOOM 后备预测器、FTQ、两位状态表与 GShare](https://docs.boom-core.org/en/latest/sections/branch-prediction/backing-predictor.html)
 - [BOOM v3 固定版本的 FTQ，取指状态、预测更新和重定向](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/ifu/fetch-target-queue.scala)
 - [BOOM v3 固定版本的前端，返回目标选择与栈顶回写](https://github.com/riscv-boom/riscv-boom/blob/53cf7ac2fff66e1e658fca1d40b783e6c45704ba/src/main/scala/v3/ifu/frontend.scala)
