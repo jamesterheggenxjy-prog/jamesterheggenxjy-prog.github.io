@@ -234,6 +234,31 @@ AMD PG313 文档把前台触发的修复称为 **on-the-fly scrubbing**。正常
 
 :::
 
+### 收到 ECC 错误报告后，系统怎样隔离坏页 {#rowhammer-page-retirement}
+
+前面从码字出发，解释了内存控制器怎样纠正一笔读回的数据。现在追踪另一个问题：如果同一片内存反复报告错误，操作系统怎样避免再把它交给应用？硬件判断错误是否可以纠正。软件能采取什么措施，还取决于错误报告是否给出可定位的物理地址，以及该页当时的用途。
+
+设系统使用 4 KiB 页框。内存错误报告给出三个可靠的物理字节地址，均为已纠正错误。操作系统可将地址右移 12 位得到物理页框号（PFN），据此把报告归到对应的页。
+
+| 报告的物理地址 | PFN | 页内偏移 | 归属 |
+| --- | --- | --- | --- |
+| `0x123538` | `0x123` | `0x538` | 页 `0x123000` |
+| `0x1235e8` | `0x123` | `0x5e8` | 同一页的另一位置 |
+| `0x124018` | `0x124` | `0x018` | 下一页 |
+
+前两笔能归在同一个页框下。即使地址不同，也可以结合该页的错误历史决定是否退出使用。这个结果只确定两处地址所属的操作系统页，无法据此断定它们处在同一条 DRAM 行或同一个 ECC 码字中。如果报告只有 DIMM 级计数，便缺少按上表定位坏页的地址，不能从总数反推出某个 PFN。
+
+在 Linux v6.12 中，若某页的数据目前仍可正确读出，但错误记录使管理策略决定提前淘汰它，可走 `soft_offline_page`。设 PFN `0x123` 是普通可迁移匿名页。若迁移成功，内核把内容迁到健康页框，并更新映射，旧页退出分配。比如应用原有虚拟地址 `0x404035e8` 命中该页的偏移 `0x5e8`，改用 PFN `0x345` 后，该虚拟地址仍有效，实际访问变成 `0x3455e8`。更新页表后还需要完成相应的[地址翻译同步](./microarch-02a-translation.md#sv39-shootdown)，才能不再使用旧页框。这里没有规定应累计几次纠正错误才处理，触发策略与硬件报码由系统决定。
+
+若报告的是不可纠正错误，内核就不能靠复制旧页保证数据正确。对硬件支持恢复、地址可定位的情形，Linux 的 `memory_failure` 路径会按页的用途尝试隔离和处理受影响的映射。对某些应用页，后台检测到错误后可以提前发 `SIGBUS`，也可以在应用实际碰到故障页时再发。某些内核页或无法迁移、无法安全隔离的页可能无法这样恢复。对可恢复文件数据，是否能重新读一份正确内容还得看它有没有另一份可靠来源。
+
+::: details 练习｜同样的物理地址发生不可纠正错误
+
+把第二条报告改为不可纠正错误，地址仍为 `0x1235e8`。它与第一条已纠正错误在同一个 PFN，是否还能按前面的例题搬到新页后继续用？
+
+PFN 仍是 `0x123`，定位方法不变，但数据的可靠性条件变了。成功迁移可读页时，复制的是仍能正确读出的内容。不可纠正错误已超出该次硬件恢复的能力，直接复制不能补回正确字节。要判断应用能否继续，只能进一步查内核能否隔离该页，以及应用是否有可用于恢复的数据副本。
+:::
+
 ## 参考文献
 
 - [Kim 等，Flipping Bits in Memory Without Accessing Them: An Experimental Study of DRAM Disturbance Errors，ISCA 2014](https://istc-cc.cmu.edu/publications/papers/2014/kim-isca14.pdf)
@@ -244,6 +269,9 @@ AMD PG313 文档把前台触发的修复称为 **on-the-fly scrubbing**。正常
 - [GPUThor：非均匀访问模式与 ECC 保护的 GPU，ACM CCS 2026](https://gputhor.com/)
 - [AMD UG586，内存控制器的 ECC 编码、解码和错误状态](https://docs.amd.com/r/en-US/ug586_7Series_MIS/Error-Correcting-Code)
 - [AMD PG313，按需 ECC 修复和后台内存巡检](https://docs.amd.com/r/en-US/pg313-network-on-chip/ECC-Scrubbing)
+- [Linux v6.12 EDAC，已纠正和不可纠正错误的类型](https://docs.kernel.org/6.12/driver-api/edac.html)
+- [Linux v6.12 `hwpoison`，恢复范围与信号策略](https://docs.kernel.org/6.12/mm/hwpoison.html#failure-recovery-modes)
+- [Linux v6.12 内存错误处理与软下线源码](https://github.com/torvalds/linux/blob/v6.12/mm/memory-failure.c)
 - [MIT 6.004，单晶体管 DRAM 单元的字线、位线和电容](https://ocw.mit.edu/courses/6-004-computation-structures-spring-2017/pages/c14/c14s1/)
 - [内存控制器怎样选择 DRAM 行与列命令](./microarch-06b-memory-queue.md#memory-row)
 - [地址怎样映射到 DRAM 的 bank 和 row](./microarch-06b-memory-queue.md#memory-address-mapping)
