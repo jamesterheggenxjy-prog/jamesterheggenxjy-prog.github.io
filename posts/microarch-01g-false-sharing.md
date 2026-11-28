@@ -41,6 +41,26 @@ book: microarch-00-intro
 
 在 C 中，`offsetof` 给出字段在结构体内的偏移，实际字段地址还要加上对象基址。`_Alignas(64)` 可以要求对象从 64 字节边界开始，编译器实际采用的偏移和结构体大小仍应由 `offsetof`、`sizeof` 核对。下一个程序会打印这两项。动态分配时也需要取得满足对象对齐要求的地址，之后才能沿同样的方法判断字段落在哪些行。
 
+### 数组已经对齐，为什么不同元素仍会共用一行 {#sharing-array-stride}
+
+假设四个线程各自负责一份记录。每份记录由一个 8 字节计数器和两个 8 字节数据字段组成，每个线程只写自己的计数器。沿用 64 字节行和基址 `0x3000`。若只在数组声明上写 `_Alignas(64)`，第一份记录从行首开始，但下一份记录的位置仍由 `sizeof` 决定。在下方用 GCC 检查的布局中，普通记录的大小为 24 字节，计数器在每份记录的开头。
+
+| 布置方法 | 四个计数器相对数组基址的偏移 | 各自所在的行起点 |
+| --- | --- | --- |
+| 数组基址对齐，记录步长仍为 24 字节 | 0、24、48、72 | `0x3000`、`0x3000`、`0x3000`、`0x3040` |
+| 计数器字段要求 64 字节对齐，记录步长变成 64 字节 | 0、64、128、192 | `0x3000`、`0x3040`、`0x3080`、`0x30c0` |
+
+第一行中，数组基址满足要求，前三个线程仍会写同一条行。第二种做法把对齐约束放在**记录类型内部的字段**上。每个数组元素都必须满足这个约束，因此编译器在记录末尾补足空间，使后一个元素的计数器也能对齐。在例题的编译结果中，四条记录由 96 字节增到 256 字节。若另外两个字段经常被顺序扫描，也要考虑增大的访问跨度。
+
+动态分配时同时核对 `_Alignof` 和 `sizeof`。下面的程序为四个对齐记录申请 `4 * sizeof(struct AlignedRecord)` 字节。提供 `aligned_alloc` 的 C 库要求请求大小是对齐值的整数倍，分配成功后成对使用 `free`。Windows 分支用 `_aligned_malloc`，对应的释放函数为 `_aligned_free`。分配起点满足对齐后，元素间隔仍由记录类型决定。
+
+::: details 练习｜同一份程序遇到 128 字节缓存行
+
+保留第二种布局的 64 字节步长，假定新基址也恰好对齐到 128 字节。四个线程仍只写各自的计数器，会占用几条缓存行？
+
+偏移 0、64 落在第一条行，偏移 128、192 落在第二条行，共两条。64 字节对齐仍满足 C 类型的要求，但未达到每个计数器独占一条 128 字节行的布局目标。
+:::
+
 ## 六次写入为什么出现五次交接 {#sharing-transfers}
 
 设初值均为 0，缓存起初均没有相关行。模型给定存储提交到缓存的顺序为 `0、1、0、1、0、1`。每步都把本核字段加一，等它完成后再开始下一步。先推演布局甲。
@@ -86,6 +106,10 @@ gcc -std=c11 -O2 -Wall -Wextra sharing_layout.c -o sharing_layout
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 
 enum { LINE_BYTES = 64 };
 
@@ -101,6 +125,11 @@ struct Separate {
 
 struct Record {
     uint64_t counter;
+    uint64_t payload[2];
+};
+
+struct AlignedRecord {
+    _Alignas(LINE_BYTES) uint64_t counter;
     uint64_t payload[2];
 };
 
@@ -161,6 +190,31 @@ int main(void)
                left / LINE_BYTES * LINE_BYTES,
                right / LINE_BYTES * LINE_BYTES);
     }
+
+    _Alignas(LINE_BYTES) struct Record compact[4];
+    const size_t align = _Alignof(struct AlignedRecord);
+    const size_t bytes = 4 * sizeof(struct AlignedRecord);
+#ifdef _WIN32
+    struct AlignedRecord *padded = _aligned_malloc(bytes, align);
+#else
+    struct AlignedRecord *padded = aligned_alloc(align, bytes);
+#endif
+    if (padded == NULL) {
+        fputs("allocation failed\n", stderr);
+        return EXIT_FAILURE;
+    }
+    printf("record strides: %zu %zu\n", sizeof compact[0], sizeof padded[0]);
+    for (size_t i = 0; i < 4; ++i) {
+        size_t compact_offset = (uintptr_t)&compact[i].counter - (uintptr_t)compact;
+        size_t padded_offset = (uintptr_t)&padded[i].counter - (uintptr_t)padded;
+        printf("worker %zu: lines %zu %zu\n", i,
+               compact_offset / LINE_BYTES, padded_offset / LINE_BYTES);
+    }
+#ifdef _WIN32
+    _aligned_free(padded);
+#else
+    free(padded);
+#endif
     return 0;
 }
 ```
@@ -173,11 +227,16 @@ split/alternating: acquisitions=2 handoffs=0
 same/grouped: acquisitions=2 handoffs=1
 split at 4: offsets 72 96, line starts 64 64
 split at 8: offsets 168 192, line starts 128 192
+record strides: 24 64
+worker 0: lines 0 0
+worker 1: lines 0 1
+worker 2: lines 0 2
+worker 3: lines 1 3
 ```
 
 上面是 GCC 15.2.0 的 x86-64 Windows 输出。`owner` 的初值 `-1` 表示行还没有可写的私有副本。第一个访问这条行的核计一次取得，从另一核接过时再计一次交接。地址布局产生的空间代价也在输出中。相邻对象本身对齐到 64 字节，两个字段只用 16 字节，结构总占 64 字节。分行对象的第二个字段从第 64 字节开始，结构总占 128 字节。若系统行长与例题不同，应重新计算布局。
 
-最后两行复算[数组的分工边界](#sharing-array-boundary)。代码只用结构体大小推导起点，题设的 64 字节基址对齐由数组对象负责。
+`split at` 两行复算[数组的分工边界](#sharing-array-boundary)。`worker` 四行则比较同样从缓存行边界开始的两份数组，每列的行号相对于该数组的第一行。普通数组的对齐来自对象声明，动态数组的对齐来自分配函数。两列从第 1 个下标开始不同，原因是每个元素实际占用的字节数不同。
 
 ## 只读字段也会被迫重新加载 {#sharing-read-write}
 
@@ -479,6 +538,7 @@ Linux 内核文档的报告示例中，基址为 `0xff1100088366d880` 的一行�
 ## 参考文献
 
 - [Linux 内核文档对伪共享及布局成本的说明](https://docs.kernel.org/kernel-hacking/false-sharing.html)
+- [C11 草案 N1570，类型对齐与对齐分配](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf) · [Microsoft C 运行库的 `_aligned_malloc` 和 `_aligned_free`](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/aligned-malloc)
 - [Linux 内核文档中的伪共享定位方法](https://docs.kernel.org/kernel-hacking/false-sharing.html#how-to-detect-and-analyze-false-sharing)
 - [Linux perf 的 `c2c` 手册与报告字段](https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux-stable/+/master/tools/perf/Documentation/perf-c2c.txt)
 - [Windows 处理器拓扑记录](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getlogicalprocessorinformation) · [线程亲和掩码](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadaffinitymask) · [高精度时间戳](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
