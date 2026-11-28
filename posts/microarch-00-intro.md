@@ -92,6 +92,7 @@ bookTitle: 微架构安全
    - [同一页的 A、D 位怎样变化](./microarch-02a-translation.md#sv39-ad-bits)
    - [换成大页以后，哪些读取还要遍历](./microarch-02a-translation.md#sv39-tlb-reach)
    - [ASID 交给另一套页表时，要清掉哪些翻译](./microarch-02a-translation.md#sv39-asid-reuse)
+   - [同一张页表，为什么两个线程的读写权限可以不同](./microarch-02a-translation.md#x86-pkru)
    - [虚拟机里的加载要查几次页表](./microarch-02a-translation.md#sv39-two-stage)
    - [用 C 逐笔数出两阶段的表项读取](./microarch-02a-translation.md#sv39-two-stage-model)
    - [设备怎样用 IOMMU 翻译 DMA 地址](./microarch-02a-translation.md#iommu-device-translation)
