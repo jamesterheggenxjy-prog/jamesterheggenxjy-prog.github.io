@@ -14,6 +14,13 @@ book: microarch-00-intro
 
 BAR-fetchers 支持多种接法。本文只取接在 Rocket 核心侧与非阻塞 L1 数据缓存之间的 `HellaCachePrefetchWrapperModule`。这个包装器直接转接核心和缓存的大部分信号，同时分出观察线，把核心的访问送给步长器。步长器沿另一条线交回候选，经一项队列进入缓存原有的请求端口。
 
+<figure class="lesson-figure" style="max-width: 490px; margin-inline: auto">
+<a href="/microarch/bar-hellacache-wrapper.svg" aria-label="放大预取器接口框图"><img src="/microarch/bar-hellacache-wrapper.svg" width="420" height="746" loading="lazy" decoding="async" alt="核心请求分两路。左路送入口仲裁，右路经观察筛选进入步长器。候选经过一项队列再参加仲裁。缓存返回物理地址和重试信号，包装器据此控制取消和队列释放。"></a>
+<figcaption>图 1　根据 BAR-fetchers 固定版本 RTL 绘制的接口框图。实线表示请求或观察，虚线表示控制与反馈。图中省略普通加载的返回路径。</figcaption>
+</figure>
+
+从图 1 上方的 `io.cpu.req` 看起。左侧实线是核心的请求路径，右侧分支先把已握手的核心请求与两拍后的结果对齐，再送给步长器。沿候选 `0x1288` 向下走，它先保存在一项队列，缓存入口获准接收时才对齐成 `0x1280`。随后沿右侧虚线看 `s2` 控制。缓存反馈用来判断这次尝试是否结束以及槽位能否释放。观察筛选也会用到核心请求的取消与拒绝信号，图中省略了这部分支线。
+
 <div role="region" aria-label="预取器和数据缓存的接口" style="max-width:100%; overflow-x:auto">
 
 | 接口或部件 | 接收什么 | 留下什么或交给谁 |
