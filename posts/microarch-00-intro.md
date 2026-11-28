@@ -61,6 +61,7 @@ bookTitle: 微架构安全
    - [生产者怎样用就绪标志发布数据](./microarch-01f-coherence.md#coherence-release-acquire)
 7. [两个线程改不同字段，为什么缓存行还会来回传](./microarch-01g-false-sharing.md)
    - [字段间隔和起始地址怎样一起决定行号](./microarch-01g-false-sharing.md#sharing-alignment)
+   - [数组已经对齐，为什么不同元素仍会共用一行](./microarch-01g-false-sharing.md#sharing-array-stride)
    - [四个线程怎样分工，才不会共写一行](./microarch-01g-false-sharing.md#sharing-four-workers)
    - [只读字段也会被迫重新加载](./microarch-01g-false-sharing.md#sharing-read-write)
 
@@ -76,6 +77,7 @@ bookTitle: 微架构安全
    - [综合题｜一次提前填充会多传多少数据](./microarch-02-prefetch.md#prefetch-dirty-traffic)
 2. [预取器和数据缓存怎样握手](./microarch-02d-prefetch-rtl.md)
    - [核心请求重试时，步长器在哪一拍看到地址](./microarch-02d-prefetch-rtl.md#rtl-snoop-retry)
+   - [两条访问流交错时，为什么历史计数还能上升](./microarch-02d-prefetch-rtl.md#rtl-interleaved-streams)
    - [逐拍跟踪一条被拒绝的请求](./microarch-02d-prefetch-rtl.md#rtl-trace)
    - [P 重试时，核心恰好又有请求](./microarch-02d-prefetch-rtl.md#rtl-retry-priority)
 
@@ -89,6 +91,8 @@ bookTitle: 微架构安全
    - [同一页的 A、D 位怎样变化](./microarch-02a-translation.md#sv39-ad-bits)
    - [换成大页以后，哪些读取还要遍历](./microarch-02a-translation.md#sv39-tlb-reach)
    - [ASID 交给另一套页表时，要清掉哪些翻译](./microarch-02a-translation.md#sv39-asid-reuse)
+   - [虚拟机里的加载要查几次页表](./microarch-02a-translation.md#sv39-two-stage)
+   - [用 C 逐笔数出两阶段的表项读取](./microarch-02a-translation.md#sv39-two-stage-model)
 
 ### 第四章　指令执行与分支预测
 
