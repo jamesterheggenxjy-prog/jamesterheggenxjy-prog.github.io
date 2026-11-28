@@ -440,6 +440,88 @@ cross page without MMU: 0 queued
 
 公共队列还可以按使用效果给候选设预算。开启 `throttle_control_percentage` 时，先按参数留下一个候选数的下限，其余额度按已使用预取与已取出的预取包的比例给出。这个参数默认是 0，默认就不根据这个比例收紧候选额度。队列最终也只允许通过地址、去重及容量条件的请求。**置信度调的是对步长的信任，节流调的是可处理的候选数，缓存仲裁调的是现在有没有资源发。** 三者的输入不同。
 
+### 命中反馈怎样限制下一批预取候选 {#prefetch-throttle-budget}
+
+假设步长器已经学会每次向前一个缓存行。当前观察到 `0x1200`，缓存行长 64 字节，一次按顺序提出六个候选 `0x1240`、`0x1280`、`0x12c0`、`0x1300`、`0x1340`、`0x1380`。这六个地址来自同一张步长表和同一份置信度。下面保持训练结果不变，只改变历史上有多少预取后来被需求使用。
+
+gem5 v24.1.0.3 在公共预取队列的 `getMaxPermittedPrefetches()` 里计算每次通知的额度。它使用两个历史计数。`issuedPrefetches` 在队列取出包时增加，随后缓存仍可能发现这是重复请求。`usefulPrefetches` 在需求访问回看本预取器设置的行标记时增加。行被找到了，但当前一致性状态不足以服务需求时，也会增加这一计数，并单列 `pfUsefulButMiss`。因此反馈反映的是预取填充的行有没有被需求碰到，还需要结合可用性和耗时判断最终收益。它也不是速度或带宽的测量值。
+
+设本次生成 `N` 个候选，节流参数为 `p`，两个历史计数分别为 `U` 和 `I`。已有取包记录时，程序用整数算术执行下面三步。乘法在除法前，正数整数除法向下取整。
+
+```text
+参与节流的数量 = (N × p) / 100
+保底数量       = max(1, N − 参与节流的数量)
+本次处理额度   = 保底数量 + ((N − 保底数量) × U) / I
+```
+
+这个公式要求 `N > 0` 且 `I > 0`。还没有取出过预取包时，函数返回原始候选数。候选本来为空时，额度就是 0。用六个候选手算，`p=75` 时参与节流的是 `450 / 100 = 4` 项，保底两项。若过去取出 80 包、其中 24 个计入使用，剩余四项中给 `4 × 24 / 80 = 1` 项，合计处理三项。如果使用计数增至 40，额度增至四项。注意计算 `N × p / 100` 时已发生一次取整，不能先把 `p` 化为整数比例再乘。
+
+| 条件 | 处理额度 | 这批候选有何变化 |
+| --- | ---: | --- |
+| `p=75`，尚无取包记录 | 6 | 首批全部进入后续判定 |
+| `p=75`，`U/I = 24/80` | 3 | 处理到 `0x12c0` |
+| `p=75`，`U/I = 40/80` | 4 | 处理到 `0x1300` |
+| `p=100`，`U/I = 0/80` | 1 | 仍保留一次尝试 |
+| `p=0`，`U/I = 24/80` | 6 | 不按使用比例削减 |
+
+这六个地址都在源地址所在的页里。额度为 3 时，如果 `0x1240` 已在待发队列里，`insert()` 识别到重复后可以不插入新项。`notify()` 仍把这次调用计入三次额度，所以循环照样在处理完 `0x12c0` 后停止。若后两项顺利插入，队列净增两项。相反，一个跨页候选在没有 MMU 参与时，于调用 `insert()` 之前被拒绝，不占用这个计数。最终发出几包还要看翻译、队列去重、准备时间和 MSHR 准入。从**生成六个地址**到**处理三个候选**、**净增两项**，任何一个数都不能直接作为下级已收到的包数。
+
+以下 C11 教学模型复算同一批记录。数组里的 `false` 代表 `insert()` 只检测出队中已有同地址，之后两项可插入。本模型把地址判定结果作为输入，所以只演算这批同页候选，不重复实现翻译和缓存仲裁。
+
+```c
+#include <stdbool.h>
+#include <stdio.h>
+
+static unsigned budget(unsigned total, unsigned pct,
+                       unsigned useful, unsigned issued)
+{
+    if (total == 0 || issued == 0) return total;
+    unsigned minimum = total - total * pct / 100;
+    if (minimum == 0) minimum = 1;
+    return minimum + (total - minimum) * useful / issued;
+}
+
+int main(void)
+{
+    printf("startup=%u\n", budget(6, 75, 0, 0));
+    printf("24/80=%u\n", budget(6, 75, 24, 80));
+    printf("40/80=%u\n", budget(6, 75, 40, 80));
+    printf("full throttle=%u\n", budget(6, 100, 0, 80));
+    printf("no throttle=%u\n", budget(6, 0, 24, 80));
+
+    const unsigned limit = budget(6, 75, 24, 80);
+    const bool inserted[] = {false, true, true, true, true, true};
+    unsigned added = 0;
+    for (unsigned i = 0; i < limit; ++i) {
+        const unsigned address = 0x1200 + 64 * (i + 1);
+        printf("candidate 0x%04x: %s\n", address,
+               inserted[i] ? "insert" : "already queued");
+        if (inserted[i]) ++added;
+    }
+    printf("processed=%u added=%u\n", limit, added);
+    return 0;
+}
+```
+
+```text
+startup=6
+24/80=3
+40/80=4
+full throttle=1
+no throttle=6
+candidate 0x1240: already queued
+candidate 0x1280: insert
+candidate 0x12c0: insert
+processed=3 added=2
+```
+
+::: details 练习｜同样的使用比例，换一个节流参数
+
+仍有六个候选，`U=24`、`I=80`，把 `p` 从 75 改为 50。若第一个地址依旧重复，其余尝试均能插入，队列会净增几项？
+
+参与节流的数量为 `6 × 50 / 100 = 3`，所以保底三项。浮动部分 `3 × 24 / 80` 向下取整为 0，最终依旧尝试三项，净增两项。两个不同参数给出相同结果，来自两级整数取整，不代表节流没有执行。
+:::
+
 ### 测量时先决定计数的事件
 
 假设无预取时测得 100 次需求未命中。启用预取后，80 个已发送请求里，50 个及时填充并在需求时命中，10 个通过在途合并服务需求，另外 20 个未被需求使用。若其他需求结果不变：
