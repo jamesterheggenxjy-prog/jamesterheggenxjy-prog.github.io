@@ -131,7 +131,99 @@ Intel 第一代 Xeon Scalable 的事件表提供了 `UNC_CHA_SF_EVICTION`，并�
 过滤器现在只用了一项，B1 可用空项。LLC 中也仍有空路，两个结构都无需选牺牲项。若改成 LLC 已满、过滤器仍有空项，则这次只需处理数据阵列的替换。能否保留被替换块的私有副本，要回到该设计的包含性和探测规则判断。
 :::
 
-### 用代码复算请求最后在哪一级取数
+### LLC 没存这条行，哪个核心能提供最新数据 {#llc-home-agent}
+
+继续看 `A0 = 0x2000`。前面的例题问的是哪份记录会被换出。现在保持 LLC 的空路和过滤器容量不变，改问：核 1 第一次读 A0 时，如果 LLC 中没有这条行，控制器还要查哪里？这需要把请求者、管理一致性的代理、实际保存数据的位置分开。
+
+在第一代 Intel Xeon Scalable 的片上网格中，LLC 分成多个 slice（一片片数据阵列），缓存与归属代理（Caching and Home Agent，CHA）也分布在片上。出自某个核心的请求，要与管理这段地址的 CHA 协调；请求来自哪个核心，并不决定地址交给哪个代理管理。Intel 的技术综述还给出一个具体的数据放置例子：一次所有缓存层都未命中的加载可以从内存取回一行，直接填充请求核的中级缓存（MLC，此处是私有 L2）。之后这条行从 MLC 逐出，如果控制器预计它还会被访问，才可能放入 LLC。处在私有层、未放入 LLC 的行，由探测过滤器记录。由此可以区分三项职责。
+
+| 对象 | 在 A0 这笔访问里承担的职责 |
+| --- | --- |
+| A0 的归属 CHA | 协调对这个物理块的请求和一致性探测，跟踪这笔事务。 |
+| LLC 数据阵列 | 可能存有 A0 的数据。如果只查到标签未命中，还要继续判定数据来源。 |
+| 探测过滤器 | 记录 A0 可能在哪个私有缓存中，帮助 CHA 确定探测对象。过滤器记录里没有待返回的数据字节。 |
+
+用一条缓存行推算。题设把 `0x2000` 交给 CHA 2 管理，核 0 和核 1 在同一个插槽。内存起初保存整数 5。在下面三个独立场景里，核 1 的私有缓存都缺 A0。前两个场景里，核 0 先取到这条行，随后写成 9，写入序列已经完成。若 9 仍在核 0 的脏行里，探测记录指向核 0，一致性事务就要取得这个最新值，读内存中的 5 会出错。如果核 0 已经逐出 A0，并且最新值进入 LLC，CHA 可以从 LLC 的数据阵列取得 9。第三个场景里，核 0 的写回已经到达内存，片上不再有 A0 的副本，才轮到内存供数。
+
+| 核 1 发出读请求之前 | LLC 数据查询 | 最新数据在何处 | 核 1 的加载结果 |
+| --- | --- | --- | --- |
+| A0 的脏副本还在核 0 | 未命中 | 核 0 的私有缓存 | `9`，由持有者供数 |
+| A0 已从核 0 逐出，9 留在 LLC | 命中 | LLC 数据阵列 | `9`，由 LLC 供数 |
+| A0 的写回已到内存，片上无副本 | 未命中 | 内存 | `9`，由内存供数 |
+
+第一行和第三行的 LLC 数据阵列都未命中，但只有第三行需要从内存读这份数据。第一行中 CHA 2 负责协调探测，核 0 才是数据持有者。核 0 交出 9 后如何降级、内存何时写回，取决于一致性协议。这里的 CHA 编号、三个初态和逐条服务是假设，用来展示职责和数据来源。Intel 的综述说明了分布式 CHA、非包含缓存和探测过滤器，实际切片选择及内部消息不会由上述题设推出。
+
+### 用 C 核对同一次加载的三个数据来源 {#llc-home-model}
+
+模型只走一笔核 1 的读请求。`dirty_owner` 表示过滤器记有脏行的持有者，本题只有核 0；`llc_has_data` 表示共享数据阵列有有效的当前值。主程序分别构造表里的三个初态。`source` 记录最新值从哪里取得，`dram_read` 只统计给这笔数据请求供数的内存读取。模型不执行探测时序，也不模拟目录元数据自身可能产生的内存流量。
+
+```c
+#include <stdbool.h>
+#include <stdio.h>
+
+struct Line {
+    bool dirty_owner;
+    bool llc_has_data;
+    unsigned owner_value;
+    unsigned llc_value;
+    unsigned memory_value;
+};
+
+static void load_on_core1(const struct Line *line)
+{
+    const char *source;
+    unsigned value;
+    unsigned dram_read = 0;
+
+    if (line->dirty_owner) {
+        source = "core 0";
+        value = line->owner_value;
+    } else if (line->llc_has_data) {
+        source = "LLC";
+        value = line->llc_value;
+    } else {
+        source = "memory";
+        value = line->memory_value;
+        dram_read = 1;
+    }
+
+    printf("LLC data=%s, source=%s, value=%u, DRAM reads=%u\n",
+           line->llc_has_data ? "hit" : "miss", source, value, dram_read);
+}
+
+int main(void)
+{
+    const struct Line private_dirty = {
+        .dirty_owner = true, .owner_value = 9, .memory_value = 5,
+    };
+    const struct Line llc_resident = {
+        .llc_has_data = true, .llc_value = 9, .memory_value = 5,
+    };
+    const struct Line memory_only = {.memory_value = 9};
+
+    load_on_core1(&private_dirty);
+    load_on_core1(&llc_resident);
+    load_on_core1(&memory_only);
+    return 0;
+}
+```
+
+```text
+LLC data=miss, source=core 0, value=9, DRAM reads=0
+LLC data=hit, source=LLC, value=9, DRAM reads=0
+LLC data=miss, source=memory, value=9, DRAM reads=1
+```
+
+把这个例题带到计数器上时，要按事件名称查定义。以 Skylake Server 为例，`MEM_LOAD_L3_MISS_RETIRED.LOCAL_DRAM` 统计由本地 DRAM 满足的退休加载，计数单位是**加载**。`MEM_LOAD_L3_HIT_RETIRED.XSNP_HITM` 统计得到 HitM 响应的退休加载，事件名虽然带有 `L3_HIT`，它描述的响应仍涉及其他核心持有的修改态副本。不能拿事件名前缀与模型的 `LLC data=hit` 逐字相等，也不能把退休加载数直接当成 DRAM 命令数。真实计数还取决于具体型号、数据来源分类和计数窗口。
+
+::: details 练习｜过滤器没变，只有写回完成的位置变了
+
+核 0 已经逐出 A0，过滤器不再跟踪核 0。假定 9 仍留在 LLC，内存还保存 5。仅凭过滤器里找不到 A0，能否去内存取 5？
+
+不能。过滤器没有私有持有者，只排除了题设里的私有副本来源。LLC 数据阵列仍命中，核 1 要从那里取 9。只有 LLC 也不再保留最新数据，并且写回已经到达内存，才能按第三种情况直接读内存。
+:::
+
+### 用代码复算私有缓存与 LLC 的替换次数
 
 这段 C 程序用 `private_copy[core][block]` 记录每个核手里有哪些块，用 `llc` 保存每组的块号，最久未使用的块排在最前。`read_block` 先查私有缓存，命中时直接返回，LLC 的顺序保持原样。到达 LLC 后，命中就把该块移到队尾，需要替换就从队首移走一块。在包含式模型里，移除队首还会清除对应的私有副本。这里把发失效到收齐确认合并成一步，两种情况都只模拟干净行，不计在途延迟。
 
@@ -281,8 +373,9 @@ only B0 and B1: L2=0 LLC requests=3 LLC hits=0 lower=3
 ## 参考文献
 
 - [Marjan Fariborz，gem5 Bootcamp《Cache Systems》第 14 页](https://gem5bootcamp.github.io/gem5-bootcamp-env/assets/slides/using-gem5-04-gem5-caches-tutorial.pdf#page=14) · [CC BY 4.0 许可](https://github.com/gem5bootcamp/gem5-bootcamp-env/blob/51590ae00b0e451c9b6a8854addbb94128ab4cac/LICENSE) · 本文复用已裁出的图并以灰度显示。
-- [Intel 第一代 Xeon Scalable 技术综述，缓存层次与数据放置](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-xeon-processor-scalable-family-technical-overview.html)
+- [Intel 第一代 Xeon Scalable 技术综述，分布式 CHA、缓存层次与数据放置](https://www.intel.com/content/www/us/en/developer/articles/technical/xeon-processor-scalable-family-technical-overview.html)
 - [Intel Skylake Server Uncore 事件表，CHA 探测过滤器容量替换计数](https://perfmon-events.intel.com/platforms/skylakex/uncore-events/uncore/)
+- [Intel Skylake Server 核心事件表，退休加载的数据来源](https://perfmon-events.intel.com/platforms/skylakex/core-events/core/)
 - [Sorin、Hill、Wood，缓存一致性教材，包含式 LLC 与失效请求](https://pages.cs.wisc.edu/~markhill/papers/primer2020_2nd_edition.pdf)
 - [gem5 v24.1.0.3，Ruby 共享 L2 的 `MT`、`MT_I` 和 `M_I` 转换](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/ruby/protocol/MESI_Two_Level-L2cache.sm)
 - [gem5 v24.1.0.3 Ruby 的 L2 换出与失效确认状态机](https://github.com/gem5/gem5/blob/b9da2bfe1e21f6efa2730edd4e80e58c5d965458/src/mem/ruby/protocol/MESI_Two_Level-L2cache.sm)
