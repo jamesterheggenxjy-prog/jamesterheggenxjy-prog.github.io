@@ -154,6 +154,7 @@ bookTitle: 微架构安全
    - [两个存储体怎样共用一条数据总线](./microarch-06b-memory-queue.md#memory-bank-overlap)
    - [写队列积满到什么程度，读请求要让路](./microarch-06b-memory-queue.md#memory-write-drain)
    - [刷新怎样打断一次本来会命中打开行的读取](./microarch-06b-memory-queue.md#memory-refresh)
+   - [另一个存储体的写入怎样拖延刷新](./microarch-06b-memory-queue.md#memory-refresh-write)
    - [写队列覆盖了部分读包，还要发几次列读](./microarch-06b-memory-queue.md#memory-write-queue-read)
    - [写队列能满足一部分，入队检查为何仍可能失败](./microarch-06b-memory-queue.md#memory-forward-admission)
 3. [划分末级缓存的路能隔离什么](./microarch-06c-cat.md)
