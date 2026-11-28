@@ -59,6 +59,36 @@ Linux 的**核心调度**（core scheduling）在选任务时考虑 SMT 同核�
 
 系统启动时，任务默认 cookie 为 0。默认组中的任务彼此可配对。用户空间可以通过 `PR_SCHED_CORE` 接口查询、创建或按权限共享标签。新建的标签与默认组不同。拥有新标签的任务同核运行时仍要检查另一侧的标签。空闲任务在配对时作特殊处理，允许和任何组搭配。普通任务的 cookie 0 与这个特殊空闲规则含义不同。
 
+### 先给线程加标签，还是先创建工作进程 {#core-cookie-inheritance}
+
+核心调度的标签存在任务上。给一个已有任务换标签时，哪些任务被一起修改，取决于系统调用指定的范围。新任务怎样取得标签，则取决于创建它的是哪个线程。两条规则一起决定服务里的工作线程和子进程最后能怎样同核。
+
+以 Linux v6.12 为例。`prctl` 的第一个参数取 `PR_SCHED_CORE`，后面的参数依次给出操作、任务 ID、范围和一个附加参数。下表只列本例用到的操作，假定系统支持核心调度，所有调用均成功。
+
+| 操作 | 任务 ID 与范围 | 效果 |
+| --- | --- | --- |
+| `PR_SCHED_CORE_CREATE` | 目标线程的 TID，范围为 `PR_SCHED_CORE_SCOPE_THREAD` | 创建新标签并放到该线程上。附加参数为 0 |
+| `PR_SCHED_CORE_SHARE_TO` | 目标线程的 TID 或目标线程组首领的 ID，范围分别为 `THREAD` 或 `THREAD_GROUP` | 把调用线程的标签交给选定的任务。附加参数为 0 |
+| `PR_SCHED_CORE_GET` | 要查的 TID，范围为 `PR_SCHED_CORE_SCOPE_THREAD` | 把一个 `unsigned long long` 大小的标识写入附加参数指定的地址。地址须按 8 字节对齐 |
+
+现在有一个服务进程，线程 A0、A1 的标签起初都是 0。A0 以单线程范围创建 α，A1 此时仍为 0。随后 A0 调用 `fork`，得到工作进程 A2。内核从调用任务 A0 取得标签，所以 A2 一开始就是 α。A2 再用 `exec` 加载别的程序，也继续使用 α。最后 A0 把自己的标签以 `THREAD_GROUP` 范围共享给原服务进程，A1 这时才得到 α。A2 属于独立线程组，它的 α 来自先前的继承。
+
+| 完成的操作 | A0 | A1 | A2 |
+| --- | --- | --- | --- |
+| 原服务进程已有两个线程 | 0 | 0 | 尚未创建 |
+| A0 只给自身创建 α | α | 0 | 尚未创建 |
+| A0 `fork`，A2 随后 `exec` | α | 0 | α |
+| A0 将 α 共享给原线程组 | α | α | α |
+
+若在第三行时 A0 和 A1 分别是 CPU 0、CPU 4 上唯一的普通候选，且 A0 的优先级更高，核心调度会先选 α。A1 即使可运行，也不能作为同核配对，CPU 4 会被强制置空。到了第四行，两侧才都可以选这两个线程。实际设置分组时还要检查系统调用的返回值。Linux v6.12 的源码会在共享前校验目标任务的访问权限，对整个线程组操作则先检查各成员。不能因为发出了调用，就认定组里的标签已经改好。
+
+::: details 练习｜把创建工作进程的动作交给 A1
+
+仍在共享 α 之前创建 A2，但改为由 A1 调用 `fork`，并假定创建成功。A0 之后把 α 共享给原线程组，A2 会得到什么标签？
+
+A2 从调用线程 A1 继承到 0。后续的共享范围是原服务进程的线程组，只修改在该组里的 A0、A1。A2 的标签仍为 0，可通过查询 A2 的 TID 核对。若要让它从创建时就得到 α，应先配置真正发起 `fork` 的线程，再创建工作进程。
+:::
+
 ## 算一次跨两个运行队列的选择 {#core-pick}
 
 看 CPU 0 和 CPU 4 的题设。A0、A1 属于同一组，cookie 为 α。B0、B1 属于另一组，cookie 为 β。以下排名是题设已经给出的调度顺序，数字越大越优先。Linux 实际还会考虑调度类及其状态，这里直接从给定候选开始。
@@ -344,6 +374,7 @@ Linux v6.12 文档把 IRQ、系统调用和 VMEXIT 列为这项调度的保护�
 - [Intel 第 12 代 Core 处理器数据手册，Hyper-Threading 的架构状态与共享资源](https://edc.intel.com/content/www/us/en/design/products/platforms/details/alder-lake-desktop/12th-generation-intel-core-processors-datasheet-volume-1-of-2/intel-hyper-threading-technology/)
 - [Sims Hill Osborne、James H. Anderson，Simultaneous Multithreading and Hard Real Time: Can It Be Safe?，图 2](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ECRTS.2020.14) · [CC BY 3.0 许可](https://creativecommons.org/licenses/by/3.0/) · 本文裁出原图和图例。
 - [Linux v6.12 核心调度文档，cookie、任务挑选与强制空闲](https://docs.kernel.org/6.12/admin-guide/hw-vuln/core-scheduling.html)
+- [Linux v6.12 的核心调度标签继承、查询和分组操作](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/core_sched.c#L102-L222)
 - [Linux v6.12 调度源码，同核逻辑 CPU 的联合选择](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/core.c#L5778-L5834)
 - [Linux v6.12 调度源码，比较各侧的当前任务并请求重新调度](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/core.c#L5836-L5896)
 - [Linux v6.12 核心调度的强制空闲归账](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/core_sched.c#L223-L270)
