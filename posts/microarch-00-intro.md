@@ -74,6 +74,7 @@ bookTitle: 微架构安全
    - [两个请求者执行同一条加载时怎样选表](./microarch-02-prefetch.md#prefetch-requestor-tables)
    - [访问方向反转后，步长表怎样重新学习](./microarch-02-prefetch.md#prefetch-reverse)
    - [MSHR 还有空项，为什么预取仍要等](./microarch-02-prefetch.md#prefetch-mshr-reserve)
+   - [命中反馈怎样限制下一批预取候选](./microarch-02-prefetch.md#prefetch-throttle-budget)
    - [预取到正确的行，为什么未命中数没降](./microarch-02-prefetch.md#prefetch-pollution)
    - [综合题｜一次提前填充会多传多少数据](./microarch-02-prefetch.md#prefetch-dirty-traffic)
 2. [预取器和数据缓存怎样握手](./microarch-02d-prefetch-rtl.md)
