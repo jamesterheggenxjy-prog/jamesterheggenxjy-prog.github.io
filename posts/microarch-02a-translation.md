@@ -638,6 +638,97 @@ h1 asid=7 walk pa=0x600045e8 value=61 0x90008 0x94010
 
 合并大页的一组输出中，两次报错是为了检查清 V 后的中间状态。最后两次遍历的 PTE 地址完全相同，物理结果仍相差 4 KiB。差值来自大页偏移，原来的两条末级 PTE 已无需读取。模型的 TLB 只存成功的翻译，第二次同步仍保留在程序里，对应真实实现可能保存无效 PTE 的情形。
 
+## 同一张页表，为什么两个线程的读写权限可以不同 {#x86-pkru}
+
+前面的 Sv39 例题里，修改页表权限以后要考虑旧 TLB 项。x86-64 也有一类由页表控制的权限，但允许线程在不修改页表的情况下进一步收紧。设一个进程有一页配置数据：更新线程偶尔修改，读取线程使用同一虚拟地址查看。两个线程共享页表和物理页。为使读取线程的普通代码无法误写配置，可以把这页交给一个保护键，并分别为两个线程设置权限。下面只讨论启用 `CR4.PKE` 时，普通用户态指令对用户页的访问。
+
+### 页表保存键号，PKRU 保存这个线程的限制
+
+对于本例中的 x86-64 4 KiB 页，叶子 PTE 的位 62 至 59 保存一个四位保护键编号，范围是 0 至 15。保护键编号随页表翻译得到。处理器还用当前逻辑处理器上的 **PKRU**（Protection Key Rights Register for User Pages）寄存器保存 16 组权限。操作系统在调度时保存和恢复线程的状态，所以两个线程即使共用这张页表，也可以有不同的 PKRU。以虚拟页 `0x40403000` 映射到物理页 `0x123000` 为例，权限判断涉及下面三项输入。
+
+| 状态所在位置 | 本例的数据 | 判定时怎样用 |
+| --- | --- | --- |
+| 4 KiB 页的叶子 PTE | 键号 3，页原本可读写，禁止取指 | 翻译给出物理页、基础访问许可和键号 |
+| 当前线程的 32 位 PKRU | 键 3 对应位 `[7:6]` | 取出 `WD` 和 `AD`，对数据访问加上限制 |
+| 当前内存操作 | 用户态加载、存储或取指 | 加载看 `AD`，存储还看 `WD`，取指按通常的执行权限检查 |
+
+对键号 `k`，**AD**（Access Disable）在位 `2k`，置 1 会禁止数据读取和写入。**WD**（Write Disable）在位 `2k + 1`，置 1 会禁止写入。键 3 的 AD 在位 6，WD 在位 7。假定只观察键 3 这一组，其他位保持各线程原有设置。`0x80` 表示这一组只置 WD，`0x40` 表示只置 AD。基础页权限始终有效：通过 PKRU 这一关以后，页原本禁止的访问仍会遇到页保护错误。
+
+| 普通页权限 | 键 3 对应的 PKRU 掩码值 | 用户态加载 | 用户态存储 | 取指 |
+| --- | --- | --- | --- | --- |
+| 可读写、不可执行 | `0x00` | 允许 | 允许 | 拒绝 |
+| 可读写、不可执行 | `0x80` | 允许 | 保护键拒绝 | 拒绝 |
+| 可读写、不可执行 | `0x40` | 保护键拒绝 | 保护键拒绝 | 拒绝 |
+| 只读、不可执行 | `0x00` | 允许 | 页权限拒绝 | 拒绝 |
+
+在支持保护键的 x86-64 Linux 上，更新线程可以保持此键可写，读取线程可设 `PKEY_DISABLE_WRITE`。例如读取线程误把一次读取写成存储时，页面已经存在，地址翻译也可以命中，但 CPU 仍会产生 `#PF`。在第二行这种只有保护键拒绝的用户态写入中，错误码的 `PK` 位置 1；Linux 向线程交付 `SIGSEGV` 时用 `SEGV_PKERR` 标识保护键原因。第四行中 PKRU 没有拒绝，故障来自基础页权限，Linux 通常报告 `SEGV_ACCERR`。上述错误归因只在例题给定的权限组合下使用，真实故障还要看地址是否有映射和异常实际报告的原因。
+
+### 改寄存器与换页的键号是两种操作
+
+Linux 的 `pkey_alloc()` 分配一个可用键号，`pkey_mprotect()` 为指定虚拟区间设置基础保护属性及页的键号。分配结果由系统决定，键号 3 仅是这里的题设。绑定以后，线程通过 glibc 的 `pkey_set()` 修改自己的键权限。在 x86 上，对 PKRU 的读写由 `RDPKRU` 和 `WRPKRU` 完成。若更新线程临时开放写入，执行 `pkey_set(key, 0)`，只改变当前线程的 PKRU。虚拟页对应的物理页和页表中的键号都保持原值，因此此操作不需要重写页表或发出 TLB shootdown。读取线程的权限也保持原值。
+
+反过来，若用 `pkey_mprotect()` 把同一页从键 3 改绑到键 5，变化的是映射本身。即使虚拟地址和物理页号都一样，后续翻译必须使用新键号。内核负责使这次修改对使用该地址空间的 CPU 生效，不能只让调用线程改自己的 PKRU。键号还是进程范围内会复用的资源。释放键之前要先取消仍引用该键的映射，或者把这些页改绑到其他键，否则日后再分配到相同编号时，旧页也会受新用途的权限设置影响。
+
+用户态能修改自身 PKRU，因此这种用法适合给受控代码加上误访问保护。若要把任意同进程代码当作互不信任的主体，还要有额外的约束来控制谁能修改权限。取指则由页的执行权限决定。比如一页原本允许执行，即便为它的键打开 AD，也只能阻止数据访问，不能用它实现禁止取指。
+
+### 用 C 复算页键号与线程权限 {#x86-pkru-model}
+
+模型输入一项教学用的叶子 PTE、线程的 PKRU 值和访问种类。假定映射有效，上层页表允许用户访问，并且执行保护已启用。代码直接取 PTE 的键号，取指检查 XD 位，数据访问再按表中的规则合成权限。它模拟架构可见的判定，不去执行系统调用或故意触发异常。
+
+```c
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+
+enum Access { LOAD, STORE, FETCH };
+static const uint64_t PTE_WRITE = UINT64_C(1) << 1;
+static const uint64_t PTE_XD = UINT64_C(1) << 63;
+
+static bool allows(uint64_t pte, uint32_t pkru, enum Access access)
+{
+    if (access == FETCH) return !(pte & PTE_XD);
+    if (access == STORE && !(pte & PTE_WRITE)) return false;
+
+    const unsigned key = (pte >> 59) & 15;
+    const unsigned rights = (pkru >> (2 * key)) & 3;
+    const unsigned disabled = access == STORE ? 3 : 1;
+    return (rights & disabled) == 0;
+}
+
+static void show(const char *name, uint64_t pte, uint32_t pkru)
+{
+    printf("%s: load=%d store=%d fetch=%d\n", name,
+           allows(pte, pkru, LOAD), allows(pte, pkru, STORE),
+           allows(pte, pkru, FETCH));
+}
+
+int main(void)
+{
+    const uint64_t key3_rw = (UINT64_C(3) << 59) | PTE_XD | 0x123007;
+    show("writer", key3_rw, 0);
+    show("reader", key3_rw, 0x80);
+    show("blocked", key3_rw, 0x40);
+    show("read-only PTE", key3_rw & ~PTE_WRITE, 0);
+    show("executable PTE", key3_rw & ~PTE_XD, 0x40);
+    return 0;
+}
+```
+
+```text
+writer: load=1 store=1 fetch=0
+reader: load=1 store=0 fetch=0
+blocked: load=0 store=0 fetch=0
+read-only PTE: load=1 store=0 fetch=0
+executable PTE: load=0 store=0 fetch=1
+```
+
+::: details 练习｜换键后，原来的写保护还生效吗
+
+保持读取线程 `PKRU = 0x80`，把可读写页从键 3 改绑成键 5，并让新的翻译生效。这个线程现在能写该页吗？若仍要限制它写，键 5 要改哪一位？
+
+能写。`0x80` 仍限制键 3 的写入，键 5 的 AD 位 10 与 WD 位 11 均为 0。要禁止该线程写键 5 的页，应把位 11 置 1，也就是合入掩码 `0x800`。修改页的键号决定查哪组位，修改线程的 PKRU 决定这组位如何判定访问。
+:::
+
 ## 虚拟机里的加载要查几次页表 {#sv39-two-stage}
 
 把开头的程序放进一台 RISC-V 虚拟机，仍从 `0x404035e8` 执行四字节加载。客户机操作系统负责第一段映射，虚拟机监控器负责第二段。RISC-V H 扩展把这两段分别称为 VS 阶段和 G 阶段。
@@ -963,6 +1054,8 @@ A 仍读 `0x401235e8`。它的上下文选择另一套页表，`PSCID=7` 也不�
 - 图 1 与图 3 来自 OpenHW CVA6 设计文档，本站补白底和留白并以灰度保存。[图与文档的源码版本](https://github.com/openhwfoundation/cva6/blob/742dc82a0c706e0a3bfb98b709fd3ee06d50d12a/docs/03_cva6_design/MMU.rst) · [对应源码库许可文本](/microarch/cva6-figure-license.txt)
 - [Linux 的页表、TLB 和遍历缓存](https://docs.kernel.org/mm/page_tables.html)
 - [Linux 内核对缓存与 TLB 同步接口的说明](https://docs.kernel.org/core-api/cachetlb.html)
+- [Intel 软件开发手册第 3A 卷，第 5.6.2、5.7 节，保护键、权限和页错误码](https://cdrdv2-public.intel.com/843856/253668-sdm-vol-3a-dec-24.pdf)
+- [Linux 6.12 内核文档，x86-64 内存保护键与故障报告](https://docs.kernel.org/6.12/core-api/protection-keys.html) · [glibc 手册，键的分配、绑定和释放](https://sourceware.org/glibc/manual/2.41/html_node/Memory-Protection.html)
 - [RISC-V International IOMMU 规范 v20250620，设备目录、设备上下文与翻译过程](https://docs.riscv.org/reference/iommu/v20250620/iommu_data_structures.html)。本文图 4 为该页图 7 原图，由 RISC-V International 发布，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。
 - [RISC-V International IOMMU 规范 v20250620，命令队列、翻译失效和完成栅栏](https://docs.riscv.org/reference/iommu/v20250620/iommu_in_memory_queues.html)
 - [Linux 6.12 内核文档，动态 DMA 映射与缓冲区生命周期](https://docs.kernel.org/6.12/core-api/dma-api-howto.html)
