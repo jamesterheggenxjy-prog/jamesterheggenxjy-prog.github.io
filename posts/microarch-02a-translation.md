@@ -677,6 +677,127 @@ G 阶段也检查叶子 PTE 的读写执行权限，而且检查 U 位时，一�
 
 这两种情形都属于加载客户机页错误。若陷阱到达 HS 模式，且平台为这次陷阱提供相应地址，`htval` 报告失败 GPA 右移两位的值。第一种失败的 GPA 是 VS 页表项地址 `0x98018`，右移得 `0x26006`。第二种才是数据地址 `0x1235e8`，右移得 `0x48d7a`。据此读错误记录时，要先判断失败的是一笔隐式页表读取，还是程序发起的数据读取。
 
+### 用 C 逐笔数出两阶段的表项读取 {#sv39-two-stage-model}
+
+下面的 C11 模型把两套页表都放在同一份以 SPA 寻址的表项数组里。`translate_g` 从 `hgatp` 指定的根表向下走，读取 G 阶段表项。`load_guest` 从 `vsatp` 指定的客户机根表开始，每次先算出表项的 GPA，再调用 `translate_g`，最后按它返回的 SPA 读取 VS 表项。读完 VS 叶子，程序用同一个函数翻译目标数据的 GPA。两类读取分别计数。模型只处理题设中的已对齐四字节加载、已设置的 A 位和合法的上级指针，省略翻译缓存和未用到的权限组合。
+
+保存为 `guest_walk.c`，用 `gcc -std=c11 -O2 -Wall -Wextra guest_walk.c -o guest_walk` 编译运行。
+
+```c
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+
+enum { V = 1, R = 2, U = 16, A = 64, READABLE = V | R | U | A };
+#define PTE(ppn, flags) ((UINT64_C(ppn) << 10) | (flags))
+
+struct Entry {
+    uint64_t address, pte;
+};
+
+static const struct Entry table[] = {
+    {0x80000000, PTE(0x80004, V)},
+    {0x80004000, PTE(0x80005, V)},
+    {0x80005480, PTE(0x40090, READABLE)},
+    {0x800054a0, PTE(0x40094, READABLE)},
+    {0x800054c0, PTE(0x40098, READABLE)},
+    {0x80005918, PTE(0x40123, READABLE)},
+    {0x40090008, PTE(0x94, V)},
+    {0x40094010, PTE(0x98, V)},
+    {0x40098018, PTE(0x123, READABLE)},
+};
+
+struct Walk {
+    bool big_g_page;
+    uint64_t deny_g_ppn, fault_gpa;
+    unsigned g_reads, vs_reads;
+};
+
+static uint64_t read_pte(uint64_t address)
+{
+    for (size_t i = 0; i < sizeof table / sizeof table[0]; ++i)
+        if (table[i].address == address)
+            return table[i].pte;
+    return 0;
+}
+
+static uint64_t translate_g(struct Walk *walk, uint64_t gpa)
+{
+    uint64_t base = 0x80000000;
+    for (int level = 2; level >= 0; --level) {
+        unsigned shift = 12 + 9 * level;
+        unsigned mask = level == 2 ? 0x7ff : 0x1ff;
+        uint64_t address = base + ((gpa >> shift) & mask) * 8;
+        uint64_t pte = read_pte(address);
+        ++walk->g_reads;
+        if (walk->big_g_page && address == 0x80004000)
+            pte = PTE(0x40000, READABLE);
+        if (!(pte & V))
+            break;
+        base = (pte >> 10) << 12;
+        if (pte & R) {
+            if (!walk->big_g_page && (gpa >> 12) == walk->deny_g_ppn)
+                pte &= ~(uint64_t)U;
+            if ((pte & READABLE) != READABLE)
+                break;
+            return base | (gpa & ((UINT64_C(1) << shift) - 1));
+        }
+    }
+    walk->fault_gpa = gpa;
+    return 0;
+}
+
+static uint64_t load_guest(struct Walk *walk, uint64_t va)
+{
+    uint64_t base = 0x90000;
+    for (int level = 2; level >= 0; --level) {
+        unsigned shift = 12 + 9 * level;
+        uint64_t gpa = base + ((va >> shift) & 0x1ff) * 8;
+        uint64_t spa = translate_g(walk, gpa);
+        if (spa == 0)
+            return 0;
+        ++walk->vs_reads;
+        uint64_t pte = read_pte(spa);
+        if (!(pte & V))
+            return 0;
+        base = (pte >> 10) << 12;
+        if (level == 0 && (pte & READABLE) == READABLE)
+            return translate_g(walk, base | (va & 0xfff));
+    }
+    return 0;
+}
+
+static void run(const char *name, struct Walk walk)
+{
+    uint64_t spa = load_guest(&walk, 0x404035e8);
+    printf("%s: G=%u VS=%u", name, walk.g_reads, walk.vs_reads);
+    if (spa != 0)
+        printf(" SPA=0x%" PRIx64 "\n", spa);
+    else
+        printf(" fault GPA=0x%" PRIx64 " htval=0x%" PRIx64 "\n",
+               walk.fault_gpa, walk.fault_gpa >> 2);
+}
+
+int main(void)
+{
+    run("4 KiB", (struct Walk){0});
+    run("2 MiB", (struct Walk){.big_g_page = true});
+    run("deny VS leaf read", (struct Walk){.deny_g_ppn = 0x98});
+    run("deny data read", (struct Walk){.deny_g_ppn = 0x123});
+    return 0;
+}
+```
+
+```text
+4 KiB: G=12 VS=3 SPA=0x401235e8
+2 MiB: G=8 VS=3 SPA=0x401235e8
+deny VS leaf read: G=9 VS=2 fault GPA=0x98018 htval=0x26006
+deny data read: G=12 VS=3 fault GPA=0x1235e8 htval=0x48d7a
+```
+
+第三行只完成两次 VS 表项读取，因为第三项对应的 GPA 在 G 阶段就失败了。第四行已经完成全部 15 次表项读取，最后一次 G 权限检查仍能阻止实际数据加载。程序打印的是翻译地址和题设有地址报告时的 `htval`，并未模拟取数和异常交付的周期。
+
 ## 参考文献
 
 - [RISC-V 特权规范，监管者内存管理栅栏与 ASID 回收](https://docs.riscv.org/reference/isa/priv/supervisor.html)
