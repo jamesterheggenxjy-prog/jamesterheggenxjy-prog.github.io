@@ -93,6 +93,7 @@ bookTitle: 微架构安全
    - [ASID 交给另一套页表时，要清掉哪些翻译](./microarch-02a-translation.md#sv39-asid-reuse)
    - [虚拟机里的加载要查几次页表](./microarch-02a-translation.md#sv39-two-stage)
    - [用 C 逐笔数出两阶段的表项读取](./microarch-02a-translation.md#sv39-two-stage-model)
+   - [设备怎样用 IOMMU 翻译 DMA 地址](./microarch-02a-translation.md#iommu-device-translation)
 
 ### 第四章　指令执行与分支预测
 
