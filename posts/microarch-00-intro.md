@@ -146,6 +146,7 @@ bookTitle: 微架构安全
 1. [不同的数据为什么会在末级缓存里互相挤掉](./microarch-06a-shared-cache.md)
    - [如果被换出的行在私有缓存里已经改过](./microarch-06a-shared-cache.md#llc-dirty-victim)
    - [LLC 还有空路，为什么私有副本也可能被撤销](./microarch-06a-shared-cache.md#llc-snoop-filter)
+   - [LLC 没存这条行，哪个核心能提供最新数据](./microarch-06a-shared-cache.md#llc-home-agent)
    - [LLC 未命中是否等于 DRAM 读取？](./microarch-06a-shared-cache.md#llc-miss-source)
 2. [未命中次数相同，为什么内存等待更长](./microarch-06b-memory-queue.md)
    - [一个读包跨两个存储体，要等哪一半](./microarch-06b-memory-queue.md#memory-split-bank-response)
