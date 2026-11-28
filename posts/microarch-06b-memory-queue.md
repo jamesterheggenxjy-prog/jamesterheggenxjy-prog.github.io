@@ -302,6 +302,71 @@ DRAM 存储单元需要定期刷新。以本篇使用的 gem5 v24.1.0.3 模型�
 刷新状态属于 rank 0。rank 1 的请求是否能立即发出，要另外核对共享的命令与数据总线。若这些资源也都允许，本题就可在 110 ns 发列读。知道两个请求共用通道，还需要知道它们是否落到同一个 rank。
 :::
 
+### 另一个存储体的写入怎样拖延刷新 {#memory-refresh-write}
+
+上一题直接给出了预充电的时刻。现在让控制器自己算出它。rank 0 有两个打开的 bank，读取仍在 `110 ns` 到达 bank 0。控制器在 `100 ns` 开始准备刷新，之后暂不向这个 rank 发新的需求命令，但允许已经安排的事务完成。题设中 rank 0 已经退出任何低功耗状态，命令总线在表中所需时刻都可用。刷新之后需重新激活目标行。
+
+在 gem5 v24.1.0.3 的 `DRAMInterface` 中，每个 bank 有 `preAllowedAt`，保存预充电的最早允许时间。发出激活后，约束至少延续到 `ACT` 加 `tRAS`，使行保持打开足够久。写入时，控制器用**写数据传输结束**加 `tWR` 更新此下限，给写入留出恢复时间。处理 rank 刷新时，状态机进入 `REF_PRE`，在有行打开的情况下取当前时刻与各 bank 的 `preAllowedAt` 中最晚的一个，在该时刻安排 `PREA`（Precharge All，关闭此 rank 的所有打开行）。等预充电完成、rank 进入可刷新状态后，才发 `REF`。这里**排空在途事务**与**达到预充电允许时刻**是两个条件：最后一批写数据下了总线，写恢复仍可能没有完成。
+
+| 约束来自哪里 | 题设给出的事件 | 预充电的最早时刻 |
+| --- | --- | ---: |
+| bank 0 的激活时间 | `95 ns` 打开目标行，`tRAS = 32 ns` | `127 ns` |
+| bank 1 的写恢复 | 已安排的写突发最后一批数据在 `128 ns` 结束，`tWR = 15 ns` | `143 ns` |
+
+假定 bank 1 的其他约束都更早，读请求也尚未发出列命令。控制器至少等到 `143 ns` 才可发 `PREA`。接下来的参数沿用上一题：`tRP = 14 ns`、`tRFC = 260 ns`、`tRCD = 14 ns`、`tCL = 14 ns`。因此 `REF` 在 `157 ns` 发出，`417 ns` 刷新结束并发 `ACT`，`431 ns` 发 `RD`，`445 ns` 取得首批数据。这笔请求从 `110 ns` 起共等 `335 ns`。访问的是 bank 0，延迟却延伸到了 bank 1 的写恢复结束，因为 `PREA` 和这次 `REF` 都以整个 rank 为单位。
+
+若 bank 1 保持打开，但这次没有在途写入，它已有的预充电约束只到 `120 ns`，则 bank 0 的 `127 ns` 成为最晚约束。其余间隔相同，首批数据提前到 `429 ns`，比有写入时早 `16 ns`。两次运行的 `tRFC` 完全一样；差别出现在刷新命令发出以前。前后两个运行都只发一条需求 `RD`，用列读数也无法看出这一段等待。
+
+下面的 C11 模型接收各时序下限，打印两种情况。`ready_to_pre` 表示刷新路径到达关闭 bank 这一步的时刻。带写入的例子取保守的 `128 ns`，代表之前安排的写传输已经完成。模型中的 PREA 时刻仍由再晚 `15 ns` 的预充电约束决定。
+
+```c
+#include <stdio.h>
+
+static unsigned later(unsigned a, unsigned b)
+{
+    return a > b ? a : b;
+}
+
+static void trace(const char *name, unsigned ready_to_pre,
+                  unsigned bank0_pre_at, unsigned bank1_pre_at)
+{
+    const unsigned arrival = 110;
+    const unsigned t_rp = 14, t_rfc = 260, t_rcd = 14, t_cl = 14;
+    const unsigned pre = later(ready_to_pre, later(bank0_pre_at, bank1_pre_at));
+    const unsigned ref = pre + t_rp;
+    const unsigned act = ref + t_rfc;
+    const unsigned rd = act + t_rcd;
+    const unsigned data = rd + t_cl;
+
+    printf("%s: PREA=%u REF=%u ACT=%u RD=%u data=%u wait=%u ns\n",
+           name, pre, ref, act, rd, data, data - arrival);
+}
+
+int main(void)
+{
+    const unsigned bank0_pre_at = 95 + 32;
+    const unsigned write_data_end = 128;
+    const unsigned t_wr = 15;
+
+    trace("with bank 1 write", write_data_end, bank0_pre_at,
+          later(120, write_data_end + t_wr));
+    trace("without bank 1 write", 100, bank0_pre_at, 120);
+    return 0;
+}
+```
+
+```text
+with bank 1 write: PREA=143 REF=157 ACT=417 RD=431 data=445 wait=335 ns
+without bank 1 write: PREA=127 REF=141 ACT=401 RD=415 data=429 wait=319 ns
+```
+
+::: details 练习｜如果写突发早一点结束
+
+把 bank 1 的写数据结束时刻改为 `111 ns`，其余约束不变。预充电要等哪个 bank？首批数据在哪一时刻到达？
+
+bank 1 的写恢复下限改成 `111 + 15 = 126 ns`，早于 bank 0 的 `127 ns`。现在由 bank 0 决定 `PREA`，所以首批数据在 `429 ns` 到达。缩短 bank 1 的写恢复下限到 `127 ns` 以下，就不会继续提前这次刷新。
+:::
+
 ### 用 C 复算调度、列读与数据就绪 {#memory-model}
 
 这个 C11 教学模型沿用同一张地址表。程序先按题设切分 `0x1650` 的读包，复算读缓冲容量，再用一个串行服务位置调度 A0、A1、B0、B1。行冲突时从选中到列读前要多等 5 周期，即 `PRE` 后两周期发 `ACT`，再等三周期发 `RD`。数据就绪比 `RD` 晚两周期。每个请求完成后才调度下一项，这是本题规则。实际控制器可以重叠不同请求的命令和数据传输。
@@ -483,6 +548,7 @@ B0 在 `[0, 4)`。A0 到达时还需等一周期，随后在 `[4, 8)` 完成服�
 - [gem5 MemPacket 的字段](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/mem_ctrl.hh#L98)
 - [gem5 DRAMInterface 的行状态、FR-FCFS 和突发统计](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/dram_interface.cc#L60)
 - [gem5 v24.1.0.3 的 rank 刷新状态机](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/dram_interface.cc#L1160)
+- [gem5 v24.1.0.3 的激活约束](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/dram_interface.cc#L214) · [写数据完成后的预充电约束](https://github.com/gem5/gem5/blob/v24.1.0.3/src/mem/dram_interface.cc#L484)
 - [Intel 对内存带宽分配与监测的说明](https://www.intel.com/content/www/us/en/developer/articles/technical/introduction-to-memory-bandwidth-allocation.html)
 
 <nav class="article-nav" aria-label="系列文章导航">
