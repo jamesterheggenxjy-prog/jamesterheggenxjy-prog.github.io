@@ -59,6 +59,7 @@ bookTitle: 微架构安全
    - [两个地址都一致，为什么还会读到两个旧值](./microarch-01f-coherence.md#coherence-store-buffering)
    - [怎样证明栅栏排除了两个旧值](./microarch-01f-coherence.md#coherence-fence-order)
    - [生产者怎样用就绪标志发布数据](./microarch-01f-coherence.md#coherence-release-acquire)
+   - [网卡收包后，CPU 何时能读到新数据](./microarch-01f-coherence.md#coherence-dma)
 7. [两个线程改不同字段，为什么缓存行还会来回传](./microarch-01g-false-sharing.md)
    - [字段间隔和起始地址怎样一起决定行号](./microarch-01g-false-sharing.md#sharing-alignment)
    - [数组已经对齐，为什么不同元素仍会共用一行](./microarch-01g-false-sharing.md#sharing-array-stride)
