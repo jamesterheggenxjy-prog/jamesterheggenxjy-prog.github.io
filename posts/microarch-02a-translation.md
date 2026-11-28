@@ -677,6 +677,30 @@ G 阶段也检查叶子 PTE 的读写执行权限，而且检查 U 位时，一�
 
 这两种情形都属于加载客户机页错误。若陷阱到达 HS 模式，且平台为这次陷阱提供相应地址，`htval` 报告失败 GPA 右移两位的值。第一种失败的 GPA 是 VS 页表项地址 `0x98018`，右移得 `0x26006`。第二种才是数据地址 `0x1235e8`，右移得 `0x48d7a`。据此读错误记录时，要先判断失败的是一笔隐式页表读取，还是程序发起的数据读取。
 
+### 监控器改了第二阶段映射，哪些旧翻译要失效 {#sv39-hfence}
+
+沿用 `0x404035e8 → 0x1235e8 → 0x401235e8`。设这条翻译属于 VMID 7，客户机还给同一个物理页安排了另一个虚拟地址。虚拟机监控器现在把 VMID 7 的 GPA 页 `0x123000` 改映到 SPA 页 `0x40345000`，各份 VS 页表保持原样。下表假定这些地址在同一个 hart 上都曾被访问过，且硬件可能还记得它们的最终翻译。
+
+| VMID | 客户机虚拟地址 | 中间得到的 GPA | 本次 G 页表更新后的结果 |
+| ---: | --- | --- | --- |
+| 7 | `0x404035e8` | `0x1235e8` | 从 `0x401235e8` 改为 `0x403455e8` |
+| 7 | `0x404075e8` | `0x1235e8` | 同样改为 `0x403455e8` |
+| 7 | `0x404045e8` | `0x1245e8` | 仍是 `0x401245e8` |
+| 8 | `0x404035e8` | `0x1235e8` | 仍是 `0x501235e8` |
+
+改动来自 G 页表，因此监控器执行 `HFENCE.GVMA`。给 `rs1` 的是 GPA 右移两位，本题可用 `0x123000 >> 2 = 0x48c00`。给 `rs2` 的是 VMID 7。这里说的是两个通用寄存器中的**值**。在指令编码中把某个操作数指定为 `x0`，才表示对应范围不作限制，例如 `HFENCE.GVMA x0, t1` 对 `t1` 指定的 VMID 使用全地址范围。
+
+若硬件分开缓存两阶段结果，前两行仍可保留各自的 GVA 到 GPA 翻译，但两次访问最后都会查到同一个已修改的 G 条目，其旧结果必须失效。若硬件缓存从 GVA 到 SPA 的最终结果，前两行都须撤掉，不能只撤第一条虚拟地址。要精确筛出这两条，最终翻译条目得保留足够多的 GPA 信息。规范也允许硬件把同一 VMID 的翻译都清掉，甚至做范围更大的失效。因此第三、四行映射没有发生改变，但软件不能假定它们的旧条目一定还会命中。
+
+与前面的[跨 hart 页表同步](#sv39-shootdown)一样，本地栅栏只约束本 hart。若虚拟机还在另一个 hart 上运行，监控器应让相关 hart 也观察到新的页表写入并完成同步。要把旧物理页交给新的使用者，必须等相关旧翻译都无法再被使用。
+
+::: details 练习｜改的是客户机自己的一个虚拟地址
+
+保持表中更新后的 G 页表，这一次由监控器更新 VMID 7、ASID 3 的 VS 叶子。只让非全局地址 `0x404035e8` 改映到 GPA `0x1245e8`，另一个虚拟地址 `0x404075e8` 仍指向原页。该用哪条同步指令？两笔加载的新结果分别是什么？
+
+在 `hgatp.VMID` 为 7 的上下文执行 `HFENCE.VVMA`，地址操作数给 `0x404035e8`，ASID 操作数给 3。这次同步的对象是 VS 页表，所以地址无需像 `HFENCE.GVMA` 那样右移。前一笔按新的 GPA 取 `0x401245e8`，后一笔仍按原 GPA 取 `0x403455e8`。两条虚拟地址是否经过同一个 G 页表项，由它们当前各自的 VS 映射决定。
+:::
+
 ### 用 C 逐笔数出两阶段的表项读取 {#sv39-two-stage-model}
 
 下面的 C11 模型把两套页表都放在同一份以 SPA 寻址的表项数组里。`translate_g` 从 `hgatp` 指定的根表向下走，读取 G 阶段表项。`load_guest` 从 `vsatp` 指定的客户机根表开始，每次先算出表项的 GPA，再调用 `translate_g`，最后按它返回的 SPA 读取 VS 表项。读完 VS 叶子，程序用同一个函数翻译目标数据的 GPA。两类读取分别计数。模型只处理题设中的已对齐四字节加载、已设置的 A 位和合法的上级指针，省略翻译缓存和未用到的权限组合。
@@ -805,6 +829,7 @@ deny data read: G=12 VS=3 fault GPA=0x1235e8 htval=0x48d7a
 - [RISC-V International 特权规范 v20250508，第 12.1.11、12.2.1、12.3.2、12.4 节](https://docs.riscv.org/reference/isa/v20250508/_attachments/riscv-privileged.pdf)
 - [RISC-V International 特权规范 v20250508，第 3.7 节，PMP 区间、权限和与分页的同步](https://docs.riscv.org/reference/isa/v20250508/_attachments/riscv-privileged.pdf#page=74)
 - [RISC-V International 特权规范 v20250508，第 21.5 节，两阶段地址翻译](https://docs.riscv.org/reference/isa/v20250508/_attachments/riscv-privileged.pdf#page=188) · [第 21.2 节，`htval` 中的客户机物理地址](https://docs.riscv.org/reference/isa/v20250508/_attachments/riscv-privileged.pdf#page=175)
+- [RISC-V International 特权规范 v20250508，第 21.3.2 节，`HFENCE.VVMA` 与 `HFENCE.GVMA`](https://docs.riscv.org/reference/isa/v20250508/_attachments/riscv-privileged.pdf#page=183)
 - 图 2 截取自该规范图 68，沿用原图的布局。[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 - [OpenHW CVA6 的 MMU、TLB 以及 PTW 接口说明](https://docs.openhwgroup.org/projects/cva6-user-manual/03_cva6_design/MMU.html)
 - [Intel 64 与 IA-32 架构软件开发手册，第 3A 卷 §5.10.3：Paging-Structure Caches](https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf)
