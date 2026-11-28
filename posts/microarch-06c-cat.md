@@ -258,6 +258,29 @@ CLOS 选择分配配置，RMID（Resource Monitoring ID，资源监测编号）�
 按整个窗口少算了 400 MiB/s，也就是漏掉域 0 的 80 MiB。域 1 在 50 ms 内记录 40 MiB，按这段运行时间计算是 800 MiB/s。两个速率的分母分别是完整窗口和域内运行时间。
 :::
 
+### Linux 怎样根据带宽读数调整节流 {#cat-mba-feedback}
+
+上面用 MBM 看已经发生的流量。**MBA**（Memory Bandwidth Allocation，内存带宽分配）可以改变某个服务等级发送请求的速率。Linux `resctrl` 默认用百分比表达 MBA 的节流配置。支持软件控制器的系统可用挂载选项 `mba_MBps`，此时 `schemata` 中的 `MB` 值表示每秒 MiB 数，内核负责把目标换成硬件接受的节流档位。同一个 CLOSID 既能选择 CAT 的容量掩码，也能选择 MBA 的节流配置，两项配置控制不同资源。
+
+沿用域 0 的 A 组，取 CLOSID 2。设它的 `schemata` 有 `MB:0=1000`，说的是域 0 的带宽控制目标。Linux v6.12 的控制过程先用 A 组的监控编号读取本地流量计数，并汇总 A 的子监控组，再用域和 CLOSID 找当前档位和目标。监控工作以约一秒为周期，以下把每段恰好视为一秒，表中每个读数都来自相邻累计计数之差。设硬件提供线性档位，最低值和步长都为 10 个百分点，开始用 60% 档。
+
+| 上一秒本地流量 | 当前档位 | 判断 | 下一档 |
+| --- | ---: | --- | ---: |
+| A 直接计 1100 MiB，子组 200 MiB，共 1300 MiB | 60% | 当前读数超过 1000 MiB/s | 50% |
+| A 直接计 750 MiB，子组 190 MiB，共 940 MiB | 50% | 若放宽一档，估计为 `940 × 60 / 50 = 1128` MiB/s | 50% |
+| A 直接计 580 MiB，子组 120 MiB，共 700 MiB | 50% | 放宽一档的估计为 `700 × 60 / 50 = 840` MiB/s | 60% |
+
+第一行说明超过目标后每轮只调一个硬件步长。第二行已经低于目标，内核仍先估计放宽以后的流量，避免每次检查都来回切换。这里令最低档位与步长相同，使源码用于估算的 `min_bw` 和实际调整用的 `bw_gran` 在数值上都为 10。这个比例是控制器的估计，第三行写入 60% 后，实际能用多少带宽还得看下一个窗口的读数。短时间内的突发仍可能超过配置目标。
+
+还要区分反馈和节流的位置。在这个 Intel x86 控制路径中，监控输入使用 LLC 域的本地内存带宽计数，硬件节流却会约束核心侧发往外部的请求。如果工作负载转为大多在 L3 命中，原来压低的档位仍可能拖慢 L2 与 L3 之间的流量，软件控制器此时可以逐步放宽。若要判断另一组的响应时间是否改善，仍需沿[内存控制器的队列与总线](./microarch-06b-memory-queue.md#memory-controller)检查等待原因。
+
+::: details 练习｜档位已经降到最低
+
+若 A 处于 10% 档，本地测得 1050 MiB/s，目标仍为 1000 MiB/s，下一次更新会降到 0% 吗？
+
+不会。当前档位已经等于最低值，不能再减一个步长。读数也不满足放宽的条件，档位留在 10%。如果后续仍高于目标，应检查目标是否可达，以及测量读取的是不是配置所对应的域和监控事件。
+:::
+
 ## 用 C 连起生效配置与填充位置 {#cat-model}
 
 程序复算两层决定。`route` 先由任务编号、CPU 默认编号和分配域得到掩码。`access` 再用掩码限制未命中可选的路。为突出这两层，模型只保存一个四路 LLC 组。块名代表已知进入该组的不同物理块。命中搜索查看所有有效路，替换用题设的精确 LRU。程序只计算寄存器字段和缓存状态，省略具体处理器的时序与跨域数据传输。
@@ -404,6 +427,8 @@ four blocks, mask=f: second lap 4/4
 - [Linux v6.12 resctrl 文档，启用 CDP 后的 L3 配置格式](https://docs.kernel.org/6.12/arch/x86/resctrl.html#l3-schemata-file-details-cdp-enabled-via-mount-option-to-resctrl)
 - [Linux v6.12 x86 的 CDP 掩码下标计算](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/resctrl/ctrlmondata.c#L251-L261) · [启用 CDP 后的等级数量](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/resctrl/rdtgroup.c#L2408-L2421)
 - [Linux v6.12 resctrl 文档，MBM 事件与带宽计数配置](https://docs.kernel.org/6.12/arch/x86/resctrl.html#filesystem-interface)
+- [Linux v6.12 resctrl 文档，MBA 软件控制和 `MB` 的 MiB/s 配置](https://docs.kernel.org/6.12/arch/x86/resctrl.html#memory-bandwidth-allocation-specified-in-mibps)
+- [Linux v6.12 的 MBA 软件控制规则](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/resctrl/monitor.c#L750-L813)
 - [Linux v6.12 x86 调度时更新 IA32_PQR_ASSOC 的源码](https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/asm/resctrl.h#L95)
 - [Linux v6.12 resctrl 独占模式的逐域检查](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/resctrl/rdtgroup.c#L1241-L1284)
 - [Intel ExCat 缓存域原图](https://github.com/intel/Intel-ECI-ExCat-K8s/blob/fbd4a7a8d5d224dc5eff47cb0e8188c806671625/assets/resctrl_cacheID_config.png) · [Apache 2.0 许可](/microarch/intel-excat-license.txt) · 本文以灰度显示原图。
