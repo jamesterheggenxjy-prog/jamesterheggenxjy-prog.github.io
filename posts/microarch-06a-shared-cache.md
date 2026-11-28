@@ -10,6 +10,8 @@ book: microarch-00-intro
 
 这两道题要沿同一条路径顺次判断。先看两个核心是否共用 LLC，再由地址算出它们是否竞争同一个组，最后检查核心重新加载时能从哪一级取得数据。先修知识是[地址如何选组](./microarch-01b-cache-mapping.md#cache-address)和[组内替换](./microarch-01b-cache-mapping.md#cache-replacement)。
 
+上一课跟踪的是 TLB 中保存的地址翻译。本课换成数据块，题目直接给出物理地址。这样可以先把翻译阶段的延迟放在一边，单独推导多个核心共用同一数据缓存时会发生哪些替换。
+
 [[toc]]
 
 ## 两条访问路径在哪一级汇合 {#llc-domain}
@@ -289,7 +291,7 @@ only B0 and B1: L2=0 LLC requests=3 LLC hits=0 lower=3
 
 <nav class="article-nav" aria-label="系列文章导航">
 
-[<span class="article-nav-text"><small>上一篇</small><strong>一次缓存计时能说明什么</strong></span>](./microarch-04b-observation.md){.article-nav-card .article-nav-prev rel=prev}
+[<span class="article-nav-text"><small>上一篇</small><strong>TLB 命中与未命中怎样留下访问痕迹</strong></span>](./microarch-04i-tlb-observation.md){.article-nav-card .article-nav-prev rel=prev}
 
 [<span class="article-nav-text"><small>下一篇</small><strong>未命中次数相同，为什么内存等待更长</strong></span>](./microarch-06b-memory-queue.md){.article-nav-card .article-nav-next rel=next}
 
